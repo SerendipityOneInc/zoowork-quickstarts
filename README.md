@@ -42,7 +42,7 @@ thin `domain/` seam.
 
 **Running against staging end-to-end (2026-08-05):** send a message, watch the reply
 stream, follow up in the same session, tool calls render, refresh rebuilds. The wire
-contract is the [API reference](https://github.com/SerendipityOneInc/zooclaw-docs) (Developer
+contract is the [API reference](https://github.com/SerendipityOneInc/zooclaw-agents-docs) (Developer
 Preview); the two biggest **[verify]** items — the durable event shape and whether a
 turn-terminal event exists — are now resolved there. The rest of the list is in
 [Before you rely on it](#before-you-rely-on-it).
@@ -169,7 +169,7 @@ so a vertical can flip it on when the shared-workspace rollout lands.
 
 The wire contract carries **[verify]** markers — shapes the docs did not pin down.
 Confirm each against your staging the ZooClaw API before shipping
-(details in the [API reference](https://github.com/SerendipityOneInc/zooclaw-docs)):
+(details in the [API reference](https://github.com/SerendipityOneInc/zooclaw-agents-docs)):
 
 - the create-time flag spelling for skipping onboarding (`onboarding: false`);
 - whether `user.message` content accepts richer blocks than a plain string;

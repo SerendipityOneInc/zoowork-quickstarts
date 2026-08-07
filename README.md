@@ -90,6 +90,17 @@ request is rejected.
 Ports default to 4000 (vite) and 8787 (worker). Both move together via `KIT_VITE_PORT`
 and `KIT_WORKER_PORT` - set them if something else on your machine holds those.
 
+### Optional variables
+
+None of these are in `.dev.vars.example`, and none are needed to run the kit. Add them to
+`.dev.vars` only if you want the behaviour described.
+
+| | |
+|---|---|
+| `ZOOCLAW_AGENT_ID` | Fixed-agent mode - see [Two ways to get an agent](#two-ways-to-get-an-agent) below. |
+| `ZOOCLAW_API_URL` | Point at a different deployment. Unset, the SDK uses the public gateway. |
+| `EMBED_KEY` | Shared gate key for embedding. When set, every `/api/app/*` call must present it (`X-Embed-Key` header or `?k=` query) or gets 401. |
+
 ### Two ways to get an agent
 
 | | `ZOOCLAW_AGENT_ID` set | unset (default) |

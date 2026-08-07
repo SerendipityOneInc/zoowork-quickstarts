@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zooclaw-app-kit",
+  "main": "worker/index.ts",
+  "compatibility_date": "2025-06-01",
+  // The ZooClaw API client + shared server code lean on Node-ish globals; keep compat on.
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Template starter leaves the *.workers.dev shell on for first runs. Lock it down
+  // (set false) once your Cloudflare Access app fronts a custom domain.
+  "workers_dev": true,
+
+  // Non-secret Worker vars (worker/env.ts). The Zooclaw trio names WHERE the ZooClaw API lives
+  // and WHICH org this deployment provisions agents under; the Access pair is what the
+  // Worker verifies the JWT against. The secret (ZOOCLAW_API_KEY) goes via `wrangler secret put`, never here. Local dev
+  // reads all of these from .dev.vars instead (see .dev.vars.example).
+  "vars": {
+    // "ZOOCLAW_ENVIRONMENT_ID": "env_optional_pin",
+    // "CF_ACCESS_TEAM_DOMAIN": "yourteam.cloudflareaccess.com",
+    // "CF_ACCESS_AUD": "<your-access-app-aud>"
+  },
+
+  // Static SPA (vite build). SPA fallback serves index.html for client-side routes;
+  // the Worker handles /api/app/* before falling through to assets.
+  "assets": {
+    "directory": "./build",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+
+  // tasks/prompts/frames + zooclaw_agents. Fill database_id after `wrangler d1 create zooclaw-app-kit`.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "zooclaw-app-kit",
+      "database_id": "REPLACE_WITH_wrangler_d1_create_output",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // One Durable Object per task: owns the long-lived API session-events → frames loop.
+  "durable_objects": {
+    "bindings": [{ "name": "TASK_DO", "class_name": "TaskDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TaskDO"] }]
+}

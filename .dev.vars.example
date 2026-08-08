@@ -1,16 +1,19 @@
-# Local-dev vars for `wrangler dev`. Copy to .dev.vars and fill in the one blank below.
+# Local-dev vars for `wrangler dev`. Copy this file and fill in the one blank below.
 #
 #   cp .dev.vars.example .dev.vars
 #
 # Never commit .dev.vars. In production set secrets with `wrangler secret put <NAME>`
 # instead; plain vars go in wrangler.jsonc.
 #
-# SECURITY: ZOOCLAW_API_KEY authenticates this Worker as your whole organization. It must
-# never reach the browser, a log, or a client bundle.
+# These two are all you need. The optional variables are in the README, under
+# "Optional variables" - none of them are required to run the kit.
 
 # ── The only thing you have to fill in ───────────────────────────────────────
 # Your org API key (`zct_…`), issued from the org admin surface. The plaintext is shown
 # exactly once when it is created.
+#
+# SECURITY: this authenticates the Worker as your whole organization. It must never
+# reach the browser, a log, or a client bundle.
 ZOOCLAW_API_KEY=
 
 # ── Local identity ───────────────────────────────────────────────────────────
@@ -18,21 +21,3 @@ ZOOCLAW_API_KEY=
 # the key your chats are stored under. Never set this in production - without it, and
 # without Access configured, every request is rejected, which is the behaviour you want.
 DEV_EMAIL=you@example.com
-
-# ── Everything below is optional ─────────────────────────────────────────────
-
-# Point at a different deployment. Unset, the SDK uses the public gateway.
-# ZOOCLAW_API_URL=
-
-# FIXED-AGENT MODE: use ONE pre-built agent (agt_…) for everyone and provision nothing.
-# Demo/single-tenant only - each conversation still gets its own session, but everyone
-# shares one agent's configuration. Unset it to exercise real per-user provisioning,
-# which works out of the box in gateway mode.
-# ZOOCLAW_AGENT_ID=
-
-# Pin a sandbox Environment version at agent create. Unset, the system default is used.
-# ZOOCLAW_ENVIRONMENT_ID=
-
-# Shared gate key for embedding. When set, every /api/app/* call must present it
-# (X-Embed-Key header or ?k= query) or gets 401.
-# EMBED_KEY=

@@ -18,7 +18,7 @@ import { Hono } from 'hono'
 import { createD1Store } from '../server/store-d1.ts'
 import { app as api, type RouteVars } from '../server/routes.ts'
 import { authedEmail } from './auth.ts'
-import { zooclawClient, type Env } from './env.ts'
+import { describeRuntime, zooclawClient, type Env } from './env.ts'
 
 export { TaskDO } from './task-do.ts'
 
@@ -37,6 +37,10 @@ app.use('/api/app/*', async (c, next) => {
   const store = createD1Store(env.DB)
   c.set('userEmail', email)
   c.set('store', store)
+  // The ONE place Env is reduced for the browser. describeRuntime keeps values inside the
+  // Worker (presence booleans only) — GET /config just serves what it returns, so the API
+  // layer never sees a secret it could widen access to.
+  c.set('runtimeConfig', describeRuntime(env))
   c.set('runTurn', async (taskId, _projectId, promptId, prompt, opts) => {
     return env.TASK_DO.getByName(taskId).runTurn(taskId, promptId, prompt, email, opts?.agentConfig)
   })

@@ -12,8 +12,8 @@ importers:
         specifier: ^5.101.0
         version: 5.101.0(react@19.2.7)
       '@zooclaw-agents/sdk':
-        specifier: ^0.0.2
-        version: 0.0.2
+        specifier: ^0.0.4
+        version: 0.0.4
       hono:
         specifier: ^4.12.10
         version: 4.12.25
@@ -1037,8 +1037,8 @@ packages:
     peerDependencies:
       vite: ^4.2.0 || ^5.0.0 || ^6.0.0 || ^7.0.0
 
-  '@zooclaw-agents/sdk@0.0.2':
-    resolution: {integrity: sha512-Ug2m1DGNEEslkhTDhy/9gTfTL+X1Vpf95sZwVHjOuZ6whyoLo+NuHPY8E+ZCG93of6DNp2yf7xLhw2V5VxCQWQ==}
+  '@zooclaw-agents/sdk@0.0.4':
+    resolution: {integrity: sha512-T0pp0KSFlZeRvOVOQfIxV3eq1EeHPp8yfqf9UJnIy+XI/WLvDSVzc4oz5+oM5kHjvDpOGGrS+X+QD7hqmIhyuQ==}
     engines: {node: '>=20'}
 
   ansi-regex@5.0.1:
@@ -2389,7 +2389,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@zooclaw-agents/sdk@0.0.2': {}
+  '@zooclaw-agents/sdk@0.0.4': {}
 
   ansi-regex@5.0.1: {}
 

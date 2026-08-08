@@ -33,13 +33,14 @@
 import { DurableObject } from 'cloudflare:workers'
 import { createD1Store } from '../server/store-d1.ts'
 import type { Store } from '../server/store.ts'
-import { messageText, ZooclawError, type ZooclawClient, type SessionHistoryEntry } from '@zooclaw-agents/sdk'
+import { messageText, ZooclawError, type ZooclawClient, type SessionHistoryEntry, type SessionRecord } from '@zooclaw-agents/sdk'
 import { driveTurn, alreadyEmitted, recordEmitted, type FrameSink, type TurnEnd } from '../server/zooclaw/turn-driver.ts'
 import {
   shouldDrainTerminal,
   shouldRetryWindowError,
   turnExpired,
   turnStatusForRun,
+  sessionStatusOf,
   AT_REST_STATUSES,
   FAILED_STATUSES,
   CANCELED_STATUSES,
@@ -379,9 +380,13 @@ export class TaskDO extends DurableObject<Env> {
         t.sessionId = sessionId
         t.submitted = true
         if (!(await this.putTurnIfOwned(t))) return // canceled during submit — interrupt already covers the sent message
-        // Surface this conversation's session id so the debug pane can show it.
+        // Surface this conversation's Zooclaw identity so the debug pane can show it. The
+        // agent id rides on the SAME marker frame rather than a new one: both ids name the
+        // same thing (which agent, which session this conversation is), and chat.ts /
+        // frameLabel key off `__zooclaw_session` alone, so widening it stays chat-invisible.
+        // Conversations started before this shipped simply carry no agent_id.
         this.frameSeq = await this.maxFrameSeq(t.promptId)
-        await this.emit(t.promptId, { __zooclaw_session: sessionId })
+        await this.emit(t.promptId, { __zooclaw_session: sessionId, agent_id: agentId })
       }
 
       const { agentId, sessionId } = t
@@ -438,8 +443,9 @@ export class TaskDO extends DurableObject<Env> {
       }
 
       // Window ended without a terminal event (the normal case). Ask the session's status.
-      const st = await client.getSession(agentId, sessionId).catch(() => ({}) as { status?: string })
-      const status = st.status
+      // The field to read is `run_status`, not `status` — see sessionStatusOf.
+      const st = await client.getSession(agentId, sessionId).catch(() => ({}) as SessionRecord)
+      const status = sessionStatusOf(st)
 
       if (status && AT_REST_STATUSES.has(status)) {
         const sawText = t.emittedText.length > 0

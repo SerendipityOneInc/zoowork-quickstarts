@@ -5,6 +5,7 @@
  */
 export const queryKeys = {
   me: () => ['me'] as const,
+  config: () => ['config'] as const,
   sessions: () => ['sessions'] as const,
   taskContent: (taskId: string) => ['taskContent', taskId] as const,
 }

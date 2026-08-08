@@ -7,7 +7,9 @@
  * SECURITY: ZOOCLAW_API_KEY authenticates this Worker as your whole organization. It must
  * never be sent to the browser, logged, or embedded in a client bundle.
  */
-import { createZooclawClient, type ZooclawClient } from '@zooclaw-agents/sdk'
+import { createZooclawClient, DEFAULT_BASE_URL, type ZooclawClient } from '@zooclaw-agents/sdk'
+import { ATTACHMENTS_ENABLED } from '../domain/agent.ts'
+import type { RuntimeConfig } from '../server/routes.ts'
 
 export interface Env {
   /** D1 database (tasks/prompts/frames + zooclaw_agents). */
@@ -75,6 +77,122 @@ export interface Env {
  *  and blocks `credentials/*` (404), so provisioning must not write them (provision.ts). */
 export function isGatewayMode(env: Env): boolean {
   return !!env.ZOOCLAW_API_KEY
+}
+
+/**
+ * Every `Env` key a deployer actually sets. The three Worker bindings (DB / TASK_DO /
+ * ASSETS) are excluded: they are wrangler wiring, not knobs a deployer turns.
+ */
+export type ConfigurableEnvKey = Exclude<keyof Env, 'DB' | 'TASK_DO' | 'ASSETS'>
+
+/**
+ * One declared row per configurable variable in `Env` above — the single source the kit
+ * uses to TELL the user what they can set. `GET /api/app/config` renders this list as
+ * presence-only status (see describeRuntime), and the Debug panel's Config tab renders
+ * that.
+ *
+ * Adding a variable to `Env` means adding it to KIT_ENV_VAR_DOCS too, and the compiler
+ * enforces that rather than trusting the convention: the docs table is a
+ * `Record<ConfigurableEnvKey, …>`, so an undeclared variable is a typecheck failure, not a
+ * silently uncovered one. That matters because server/routes.test.ts derives its leak
+ * sentinels from this list — a variable missing here would have had NO leak coverage at all.
+ */
+export interface EnvVarDoc {
+  /** The variable name, exactly as it appears in .dev.vars / wrangler.jsonc. */
+  name: ConfigurableEnvKey
+  /** One line: what changes when it is set, and where that lands in the ZooClaw API. */
+  effect: string
+  /** True when the value is (or carries) a credential — `wrangler secret put`, never
+   *  wrangler.jsonc. The kit reports these as presence only; see describeRuntime. */
+  secret: boolean
+}
+
+/** The source of truth. Exhaustive over ConfigurableEnvKey by construction — omit a key
+ *  and `tsc` fails here; invent one that is not in `Env` and it fails here too. */
+const KIT_ENV_VAR_DOCS: Record<ConfigurableEnvKey, Omit<EnvVarDoc, 'name'>> = {
+  ZOOCLAW_API_KEY: {
+    effect: 'Org service token. Rides as the Bearer on every ZooClaw API call; its presence selects gateway mode.',
+    secret: true,
+  },
+  ZOOCLAW_API_URL: {
+    effect: 'Base URL for every ZooClaw API call. Unset, the SDK targets the public gateway.',
+    secret: false,
+  },
+  ZOOCLAW_ORG_ID: {
+    effect: 'ownership.org_id on created agents. Discarded in gateway mode — the gateway substitutes the key’s own tenant.',
+    secret: false,
+  },
+  ZOOCLAW_LITELLM_KEY: {
+    effect: 'Internal mode only: written as the agent’s `litellm` platform credential. Unused in gateway mode (credentials/* is 404).',
+    secret: true,
+  },
+  ZOOCLAW_USER_INTERNAL_TOKEN: {
+    effect: 'Internal mode only: written as the agent’s `user-internal-token` credential. Unused in gateway mode.',
+    secret: true,
+  },
+  ZOOCLAW_ENVIRONMENT_ID: {
+    effect: 'resource.environment_id at agent create. The pin locks after the first sandbox — later changes return 409 environment_locked.',
+    secret: false,
+  },
+  ZOOCLAW_AGENT_ID: {
+    effect: 'Fixed-agent mode: everyone talks to this agent and the kit provisions nothing — no create, no config PUT.',
+    secret: false,
+  },
+  EMBED_KEY: {
+    effect: 'Shared embed gate. Set, every /api/app/* call must present it (X-Embed-Key header or ?k=) or gets 401.',
+    secret: true,
+  },
+  CF_ACCESS_TEAM_DOMAIN: {
+    effect: 'Cloudflare Access team domain — the JWT issuer the Worker verifies each request against.',
+    secret: false,
+  },
+  CF_ACCESS_AUD: {
+    effect: 'The Access application’s AUD tag — the JWT audience the Worker requires.',
+    secret: false,
+  },
+  DEV_EMAIL: {
+    effect: 'Local dev only: bypasses Access and acts as this email (the tenant key everything is stored under).',
+    secret: false,
+  },
+}
+
+export const KIT_ENV_VARS: EnvVarDoc[] = (Object.keys(KIT_ENV_VAR_DOCS) as ConfigurableEnvKey[]).map((name) => ({
+  name,
+  ...KIT_ENV_VAR_DOCS[name],
+}))
+
+/** Is a declared variable present? Reads by name off Env — every declared row is a string
+ *  var, so a non-string binding can never be mistaken for one. */
+function isConfigured(env: Env, name: ConfigurableEnvKey): boolean {
+  const v = (env as unknown as Record<string, unknown>)[name]
+  return typeof v === 'string' && v.length > 0
+}
+
+/**
+ * The non-secret description of THIS deployment, served by `GET /api/app/config`.
+ *
+ * SECURITY: variable VALUES never appear in the result — every declared variable is
+ * reduced to `configured: true | false`. ZOOCLAW_API_KEY authenticates the Worker as the
+ * whole organization, so a leak here is a tenant-wide compromise; the one value that does
+ * cross the wire is the resolved API base URL, which is a public endpoint and the single
+ * thing a user cannot otherwise tell about their deployment. server/routes.test.ts locks
+ * both halves of that rule.
+ */
+export function describeRuntime(env: Env): RuntimeConfig {
+  return {
+    runtime: {
+      // The kit builds a client only from ZOOCLAW_API_KEY (see zooclawClient), so gateway
+      // is the only reachable transport; without the key nothing can talk to the API at all.
+      transport: isGatewayMode(env) ? 'gateway' : 'unconfigured',
+      provisioning: env.ZOOCLAW_AGENT_ID ? 'fixed-agent' : 'per-user',
+      identity: env.DEV_EMAIL ? 'dev-email' : env.CF_ACCESS_TEAM_DOMAIN && env.CF_ACCESS_AUD ? 'cloudflare-access' : 'unconfigured',
+      embedGate: !!env.EMBED_KEY,
+      attachments: ATTACHMENTS_ENABLED,
+      apiBaseUrl: env.ZOOCLAW_API_URL || DEFAULT_BASE_URL,
+      apiBaseUrlFrom: env.ZOOCLAW_API_URL ? 'ZOOCLAW_API_URL' : 'sdk-default',
+    },
+    env: KIT_ENV_VARS.map((v) => ({ name: v.name, effect: v.effect, secret: v.secret, configured: isConfigured(env, v.name) })),
+  }
 }
 
 /** The provisioning slice of Env, in the shape worker/provision.ts wants. */

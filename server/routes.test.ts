@@ -1,8 +1,8 @@
 /**
  * HTTP-layer tests over the in-memory store with a fake turn runner — no DO, no the ZooClaw API,
  * no quota. Proves tenant scoping (404 on cross-user), the create/follow-up turn wiring,
- * the attachments-disabled 501 gate, and the /content self-heal hook (R3). The SSE
- * /stream is covered by tail.test.ts.
+ * the attachments-disabled 501 gate, the /content self-heal hook (R3), and that GET /config
+ * cannot leak a deployment secret. The SSE /stream is covered by tail.test.ts.
  *
  * Attachment display tests seed the store directly (saveAttachment) rather than going
  * through POST /files — that route 501s while ATTACHMENTS_ENABLED is off, but the display
@@ -14,10 +14,19 @@ import assert from 'node:assert/strict'
 import { Hono } from 'hono'
 import { app, type RouteVars } from './routes.ts'
 import { createMemStore } from './store-mem.ts'
+import { describeRuntime, KIT_ENV_VARS, type Env } from '../worker/env.ts'
 
 type Store = ReturnType<typeof createMemStore>
 
-function makeApp(over: { userEmail?: string; store?: Store; recoverPrompt?: RouteVars['recoverPrompt']; runTurnResult?: boolean } = {}) {
+function makeApp(
+  over: {
+    userEmail?: string
+    store?: Store
+    recoverPrompt?: RouteVars['recoverPrompt']
+    runTurnResult?: boolean
+    runtimeConfig?: RouteVars['runtimeConfig']
+  } = {},
+) {
   const store = over.store ?? createMemStore()
   const runTurnCalls: Array<[string, string, string, string]> = []
   const runTurnOpts: Array<Parameters<RouteVars['runTurn']>[4]> = []
@@ -27,6 +36,8 @@ function makeApp(over: { userEmail?: string; store?: Store; recoverPrompt?: Rout
   const vars: RouteVars = {
     userEmail: over.userEmail ?? 'u@x.com',
     store,
+    // Built the same way the Worker builds it, from an Env with nothing set.
+    runtimeConfig: over.runtimeConfig ?? describeRuntime({} as Env),
     runTurn: async (taskId, projectId, promptId, prompt, opts) => {
       runTurnCalls.push([taskId, projectId, promptId, prompt])
       runTurnOpts.push(opts)
@@ -49,6 +60,7 @@ function makeApp(over: { userEmail?: string; store?: Store; recoverPrompt?: Rout
   root.use('*', async (c, next) => {
     c.set('userEmail', vars.userEmail)
     c.set('store', vars.store)
+    c.set('runtimeConfig', vars.runtimeConfig)
     c.set('runTurn', vars.runTurn)
     c.set('cancelTurn', vars.cancelTurn)
     c.set('recoverPrompt', vars.recoverPrompt)
@@ -178,6 +190,81 @@ test('POST /tasks WITHOUT files sends the prompt verbatim (no directive)', async
 test('GET /me returns the authed email', async () => {
   const { root } = makeApp()
   assert.deepEqual(await (await root.request('/me')).json(), { email: 'u@x.com' })
+})
+
+/** Every declared variable, filled with a value nothing else in the response could contain.
+ *  Driven off KIT_ENV_VARS, which worker/env.ts builds from a `Record<ConfigurableEnvKey, …>`
+ *  — so this sentinel set is exhaustive over Env by TYPE, not by convention: a new variable
+ *  that skipped the declaration would fail `tsc` before it could reach this test uncovered. */
+function sentinelEnv(): { env: Env; sentinels: Map<string, string> } {
+  const sentinels = new Map(KIT_ENV_VARS.map((v) => [v.name, `zct_LEAK_SENTINEL_${v.name}_9f3a`]))
+  // ZOOCLAW_API_URL is the one variable whose value is deliberately public (it IS the
+  // resolved base URL), so its sentinel is shaped like the URL it stands in for.
+  sentinels.set('ZOOCLAW_API_URL', 'https://leak-sentinel.example/service/v1')
+  return { env: Object.fromEntries(sentinels) as unknown as Env, sentinels }
+}
+
+test('GET /config reports every declared variable as presence ONLY (no value-bearing field)', async () => {
+  const { env } = sentinelEnv()
+  const { root } = makeApp({ runtimeConfig: describeRuntime(env) })
+  const res = await root.request('/config')
+  assert.equal(res.status, 200)
+  const body = (await res.json()) as RouteVars['runtimeConfig']
+
+  // The `runtime` object is locked to an exact key set, for the same reason each env row is.
+  // A whole-string sentinel search cannot catch a value that arrives MASKED, TRUNCATED,
+  // last-4 or base64'd — `runtime.apiKeyPreview: 'zct_LEAK_SEN…'` would sail past the leak
+  // test below. So widening `runtime` has to be a deliberate edit to this list, and
+  // `apiBaseUrl` (already a raw Env value) stays the single reviewed exception.
+  assert.deepEqual(
+    Object.keys(body.runtime).sort(),
+    ['apiBaseUrl', 'apiBaseUrlFrom', 'attachments', 'embedGate', 'identity', 'provisioning', 'transport'],
+    'runtime object shape',
+  )
+
+  assert.equal(body.env.length, KIT_ENV_VARS.length)
+  for (const row of body.env) {
+    // Shape, not one hard-coded key: a row may carry ONLY these four fields. Adding a
+    // `value` (or anything else sourced from Env) fails here.
+    assert.deepEqual(Object.keys(row).sort(), ['configured', 'effect', 'name', 'secret'], `${row.name} row shape`)
+    assert.equal(typeof row.configured, 'boolean')
+    assert.equal(row.configured, true) // every sentinel was set, so presence is really derived from Env
+  }
+})
+
+test('GET /config never echoes a variable VALUE — only the deliberately public base URL', async () => {
+  // The whole point: a leaked zct_ token is a tenant-wide compromise, so this must fail
+  // loudly the moment anyone widens the response to carry a value.
+  const { env, sentinels } = sentinelEnv()
+  const { root } = makeApp({ runtimeConfig: describeRuntime(env) })
+  const body = (await (await root.request('/config')).json()) as RouteVars['runtimeConfig']
+
+  // The single sanctioned exception, named explicitly.
+  assert.equal(body.runtime.apiBaseUrl, sentinels.get('ZOOCLAW_API_URL'))
+  assert.equal(body.runtime.apiBaseUrlFrom, 'ZOOCLAW_API_URL')
+
+  // Blank that one field out; NO other variable's value may appear anywhere in the rest of
+  // the response — not in `env`, not in a mode flag, not in a nested field added later.
+  const rest = JSON.stringify({ ...body, runtime: { ...body.runtime, apiBaseUrl: '' } })
+  for (const [name, sentinel] of sentinels) {
+    if (name === 'ZOOCLAW_API_URL') continue
+    assert.equal(rest.includes(sentinel), false, `${name} value leaked into GET /config`)
+  }
+})
+
+test('GET /config derives the deployment mode flags from Env', async () => {
+  const fixed = describeRuntime({ ZOOCLAW_API_KEY: 'zct_x', ZOOCLAW_AGENT_ID: 'agt_x', DEV_EMAIL: 'you@example.com' } as Env)
+  assert.deepEqual(
+    { t: fixed.runtime.transport, p: fixed.runtime.provisioning, i: fixed.runtime.identity, e: fixed.runtime.embedGate },
+    { t: 'gateway', p: 'fixed-agent', i: 'dev-email', e: false },
+  )
+  // No key → nothing can reach the API at all; no ZOOCLAW_AGENT_ID → per-user provisioning.
+  const bare = describeRuntime({} as Env)
+  assert.deepEqual(
+    { t: bare.runtime.transport, p: bare.runtime.provisioning, i: bare.runtime.identity, from: bare.runtime.apiBaseUrlFrom },
+    { t: 'unconfigured', p: 'per-user', i: 'unconfigured', from: 'sdk-default' },
+  )
+  assert.equal(bare.env.every((e) => e.configured === false), true)
 })
 
 test('POST /tasks creates the task + first prompt and fires the turn', async () => {

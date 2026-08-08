@@ -1,4 +1,10 @@
 import type { AgentConfig } from '../domain/agent.ts'
+// TYPE-ONLY (erased at build — verbatimModuleSyntax): the runtime description is an API
+// response contract, so the client reads the server's definition instead of keeping a
+// second copy that could drift. No server code enters the browser bundle.
+import type { RuntimeConfig } from '../server/routes.ts'
+
+export type { EnvVarStatus, RuntimeConfig } from '../server/routes.ts'
 
 const BASE = '/api/app'
 
@@ -50,6 +56,11 @@ export interface SessionSummary {
 
 /** The signed-in user (from the auth provider). 401 → not authenticated. */
 export const getMe = (): Promise<{ email: string }> => json('/me')
+
+/** What this deployment lets you configure: mode flags, the resolved API base URL, and
+ *  presence-only status per env var. Never carries a secret VALUE — see server/routes.ts
+ *  RuntimeConfig and the leak test in server/routes.test.ts. */
+export const getConfig = (): Promise<RuntimeConfig> => json('/config')
 
 /** The caller's sessions (newest first). */
 export async function listSessions(): Promise<SessionSummary[]> {

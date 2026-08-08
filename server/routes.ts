@@ -4,6 +4,7 @@
  * cross-user access is rejected (404, indistinguishable from missing).
  *
  *   GET  /me                    → { email }
+ *   GET  /config                → what this deployment lets you configure (presence only)
  *   GET  /tasks                 → the caller's sessions (conversations)
  *   POST /tasks                 → create conversation + first turn
  *   POST /tasks/:id/prompts     → follow-up turn (same Zooclaw session)
@@ -34,10 +35,65 @@ export interface FileRef {
   filename: string
 }
 
+/**
+ * One deployment variable, reported to the browser as PRESENCE ONLY.
+ *
+ * There is no `value` field and there must never be one: ZOOCLAW_API_KEY authenticates the
+ * Worker as an entire organization, so shipping any variable's value to the browser is a
+ * tenant-wide compromise. The Worker builds these rows from its declared variable registry
+ * (worker/env.ts KIT_ENV_VARS); server/routes.test.ts asserts the shape so the field cannot
+ * come back.
+ */
+export interface EnvVarStatus {
+  name: string
+  /** Set in this deployment? The value itself never leaves the Worker. */
+  configured: boolean
+  /** Carries a credential (`wrangler secret put`), as opposed to a plain wrangler var. */
+  secret: boolean
+  /** One line: what it changes, and where that lands in the ZooClaw API. */
+  effect: string
+}
+
+/**
+ * GET /config — a non-secret description of the running deployment, so a newcomer can see
+ * WHICH mode the kit is in and WHICH variables are wired without reading the Worker source.
+ * Built by worker/env.ts describeRuntime (the only file that knows the full Env).
+ *
+ * `runtime.apiBaseUrl` is the ONE env-derived value in this response: a public endpoint,
+ * and the single fact a user cannot otherwise discover about their own deployment.
+ *
+ * ADDING A FIELD TO `runtime` MEANS EDITING server/routes.test.ts, which pins this object to
+ * an exact key set. That is deliberate: the leak test can only search for whole sentinel
+ * values, so a masked or truncated secret (`apiKeyPreview: 'zct_abc…'`) would pass it — the
+ * key list is what forces a new field to be looked at.
+ */
+export interface RuntimeConfig {
+  runtime: {
+    /** How the Worker reaches the ZooClaw API. `unconfigured` → no ZOOCLAW_API_KEY, so no call can be made. */
+    transport: 'gateway' | 'unconfigured'
+    /** `fixed-agent` (ZOOCLAW_AGENT_ID: one shared agent, kit provisions nothing) or per-user provisioning. */
+    provisioning: 'fixed-agent' | 'per-user'
+    /** Who the Worker believes the caller is (worker/auth.ts). */
+    identity: 'cloudflare-access' | 'dev-email' | 'unconfigured'
+    /** EMBED_KEY is set → every /api/app/* call must present it. */
+    embedGate: boolean
+    /** domain/agent.ts ATTACHMENTS_ENABLED — ships false while the Files API is unwired. */
+    attachments: boolean
+    /** Resolved base URL every ZooClaw API call goes to. */
+    apiBaseUrl: string
+    apiBaseUrlFrom: 'ZOOCLAW_API_URL' | 'sdk-default'
+  }
+  env: EnvVarStatus[]
+}
+
 /** Injected per-request by the composition root. */
 export interface RouteVars {
   userEmail: string
   store: Store
+  /** This deployment's non-secret runtime description, served verbatim by GET /config.
+   *  Built once per request by the composition root (worker/index.ts describeRuntime), so
+   *  this layer never touches Env — and cannot accidentally widen what it exposes. */
+  runtimeConfig: RuntimeConfig
   /** Start the prompt's turn. False → another turn is already in flight on this
    *  conversation (the DO refused); the route marks the rejected prompt failed and
    *  answers 409 — accepting it would orphan a 'running' prompt forever. */
@@ -76,6 +132,11 @@ async function ownedTask(store: Store, taskId: string, email: string): Promise<T
 }
 
 app.get('/me', (c) => c.json({ email: c.var.userEmail }))
+
+// What this deployment lets you configure. Read-only, and secret-free by construction:
+// the composition root hands over an already-reduced RuntimeConfig (presence booleans, no
+// values), so there is no Env in scope here to leak from.
+app.get('/config', (c) => c.json(c.var.runtimeConfig))
 
 app.get('/tasks', async (c) => {
   return c.json({ tasks: await c.var.store.listTasksByUser(c.var.userEmail) })

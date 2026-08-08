@@ -9,6 +9,9 @@ import { AGENT_INSTRUCTION, SKILL_ID_PLACEHOLDER, TOOLS, defaultAgentConfig, typ
  *
  * This is kit UI (configuring the Zooclaw agent), distinct from domain/view.tsx (the
  * business pane). It edits a plain AgentConfig; App owns the state + persistence.
+ *
+ * The field ids below are jump targets: the Debug panel's Config tab NAMES each knob and
+ * scrolls/focuses the editor here rather than shipping a second copy of it.
  */
 export function SettingsPanel({
   config,
@@ -60,7 +63,7 @@ export function SettingsPanel({
       />
 
       <div className="settings-label">Tools</div>
-      <div className="settings-tools">
+      <div className="settings-tools" id="agent-tools" tabIndex={-1}>
         {TOOLS.map((t) => {
           const on = config.tools[t.key] ?? t.defaultOn
           return (

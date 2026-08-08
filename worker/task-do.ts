@@ -379,9 +379,13 @@ export class TaskDO extends DurableObject<Env> {
         t.sessionId = sessionId
         t.submitted = true
         if (!(await this.putTurnIfOwned(t))) return // canceled during submit — interrupt already covers the sent message
-        // Surface this conversation's session id so the debug pane can show it.
+        // Surface this conversation's Zooclaw identity so the debug pane can show it. The
+        // agent id rides on the SAME marker frame rather than a new one: both ids name the
+        // same thing (which agent, which session this conversation is), and chat.ts /
+        // frameLabel key off `__zooclaw_session` alone, so widening it stays chat-invisible.
+        // Conversations started before this shipped simply carry no agent_id.
         this.frameSeq = await this.maxFrameSeq(t.promptId)
-        await this.emit(t.promptId, { __zooclaw_session: sessionId })
+        await this.emit(t.promptId, { __zooclaw_session: sessionId, agent_id: agentId })
       }
 
       const { agentId, sessionId } = t

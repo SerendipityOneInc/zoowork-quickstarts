@@ -1,6 +1,10 @@
 import { atom } from 'jotai'
 import { atomWithStorage } from 'jotai/utils'
-import { defaultAgentConfig, type AgentConfig } from '../../domain/agent.ts'
+
+/** The edited agent config. Defined in store/agent-config.ts (see the note there: this
+ *  module touches `location` at load, so it cannot be imported outside a browser) and
+ *  re-exported here, which is where the rest of the app already looks for it. */
+export { configAtom } from './agent-config.ts'
 
 // The current session lives in the URL (?t=…) so refresh / deep-link restores it.
 // Identity comes from the auth provider, so a session belongs to a user, not a tab.
@@ -53,11 +57,6 @@ const rawThemeStorage = {
   },
 }
 export const themeAtom = atomWithStorage<'light' | 'dark'>('zak-theme', 'light', rawThemeStorage)
-
-/** Agent config (system prompt + tool toggles + skill id) the UI edits and a new session
- *  applies. Persisted so it survives reload; sent on createTask (the first turn applies
- *  it). The `zak-` key is fresh, so no template-era stored shape can be rehydrated. */
-export const configAtom = atomWithStorage<AgentConfig>('zak-agent-config', defaultAgentConfig())
 
 // A brand-new session has no taskId yet, so its first send is "busy" only via this flag
 // during the createTask round-trip. Lives here so nav actions can clear it.

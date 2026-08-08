@@ -5,7 +5,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { shouldDrainTerminal, shouldRetryWindowError, turnExpired, MAX_TERMINAL_DRAINS, MAX_WINDOW_ERRORS } from './turn-finalize.ts'
+import { shouldDrainTerminal, shouldRetryWindowError, turnExpired, sessionStatusOf, AT_REST_STATUSES, MAX_TERMINAL_DRAINS, MAX_WINDOW_ERRORS } from './turn-finalize.ts'
 
 test('shouldDrainTerminal: a progressed window always drains again — even with text shown (R-b)', () => {
   const base = { sawText: false, windowProgressed: false, terminalDrains: 0, now: 0, deadline: 1000, hardDeadline: 2000 }
@@ -78,4 +78,24 @@ test('shouldRetryWindowError: deterministic upstream rejections fail fast (contr
   assert.equal(shouldRetryWindowError({ ...base, status: 500 }), true)
   assert.equal(shouldRetryWindowError({ ...base, status: 429 }), true)
   assert.equal(shouldRetryWindowError({ ...base }), true) // network error: no status
+})
+
+test('sessionStatusOf reads run_status — `status` is null on every getSession', () => {
+  // The regression this pins: reading `status` made the at-rest backstop dead code. Staging
+  // returns the outcome in `run_status` and `status: null` on the same body, so a test that
+  // only fed `{status}` would have passed while production never finalized on this path.
+  assert.equal(sessionStatusOf({ run_status: 'succeeded', status: null }), 'succeeded')
+  assert.ok(AT_REST_STATUSES.has(sessionStatusOf({ run_status: 'succeeded', status: null })!))
+
+  // A deployment that populates `status` instead still works.
+  assert.equal(sessionStatusOf({ status: 'idle' }), 'idle')
+  // run_status wins when both are real.
+  assert.equal(sessionStatusOf({ run_status: 'failed', status: 'idle' }), 'failed')
+
+  // Nothing to go on → undefined, which turnExpired reads as "not positively alive", so the
+  // turn expires on the SOFT deadline rather than being granted the hard cap.
+  assert.equal(sessionStatusOf({}), undefined)
+  assert.equal(sessionStatusOf({ status: null }), undefined)
+  assert.equal(sessionStatusOf(undefined), undefined)
+  assert.equal(turnExpired({ now: 100, deadline: 50, hardDeadline: 999, sessionStatus: sessionStatusOf({ status: null }) }), true)
 })

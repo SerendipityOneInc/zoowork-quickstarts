@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.0",
-    "@zooclaw-agents/sdk": "^0.0.3",
+    "@zooclaw-agents/sdk": "^0.0.4",
     "hono": "^4.12.10",
     "jose": "^6.2.3",
     "jotai": "^2.20.1",

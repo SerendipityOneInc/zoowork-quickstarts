@@ -30,6 +30,22 @@ export const AT_REST_STATUSES = new Set(['idle', 'completed', 'succeeded', 'fail
 export const FAILED_STATUSES = new Set(['failed', 'error'])
 export const CANCELED_STATUSES = new Set(['canceled', 'cancelled'])
 
+/**
+ * Pick the session's at-rest signal out of a `getSession` body — `run_status`, NOT `status`.
+ *
+ * On `getSession` the ZooClaw API returns `status: null` for every session and puts the outcome in
+ * `run_status` (staging-verified 2026-08-07; SDK 0.0.4 types both, and its JSDoc says to prefer
+ * `run_status`). Reading `status` made the whole backstop below dead code: it was always nullish,
+ * so a window that ended without `run.finished` never finalized on an at-rest session and instead
+ * sat until the soft deadline expired.
+ *
+ * `status` is kept as a fallback because it costs nothing and a deployment that does populate it
+ * keeps working. Both nullish → undefined, which `turnExpired` reads as "not positively alive".
+ */
+export function sessionStatusOf(session: { run_status?: string; status?: string | null } | undefined): string | undefined {
+  return session?.run_status ?? session?.status ?? undefined
+}
+
 /** `run.finished` carries the run's own outcome enum (the Events reference:
  *  succeeded | failed | aborted) — a DIFFERENT vocabulary from the session status above,
  *  which is why it gets its own mapping. `aborted` is an interrupt, i.e. our 'canceled'. */

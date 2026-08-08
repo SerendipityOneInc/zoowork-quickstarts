@@ -33,13 +33,14 @@
 import { DurableObject } from 'cloudflare:workers'
 import { createD1Store } from '../server/store-d1.ts'
 import type { Store } from '../server/store.ts'
-import { messageText, ZooclawError, type ZooclawClient, type SessionHistoryEntry } from '@zooclaw-agents/sdk'
+import { messageText, ZooclawError, type ZooclawClient, type SessionHistoryEntry, type SessionRecord } from '@zooclaw-agents/sdk'
 import { driveTurn, alreadyEmitted, recordEmitted, type FrameSink, type TurnEnd } from '../server/zooclaw/turn-driver.ts'
 import {
   shouldDrainTerminal,
   shouldRetryWindowError,
   turnExpired,
   turnStatusForRun,
+  sessionStatusOf,
   AT_REST_STATUSES,
   FAILED_STATUSES,
   CANCELED_STATUSES,
@@ -442,8 +443,9 @@ export class TaskDO extends DurableObject<Env> {
       }
 
       // Window ended without a terminal event (the normal case). Ask the session's status.
-      const st = await client.getSession(agentId, sessionId).catch(() => ({}) as { status?: string })
-      const status = st.status
+      // The field to read is `run_status`, not `status` — see sessionStatusOf.
+      const st = await client.getSession(agentId, sessionId).catch(() => ({}) as SessionRecord)
+      const status = sessionStatusOf(st)
 
       if (status && AT_REST_STATUSES.has(status)) {
         const sawText = t.emittedText.length > 0

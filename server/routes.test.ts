@@ -12,11 +12,23 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { Hono } from 'hono'
-import { app, type RouteVars } from './routes.ts'
+import { app, type AgentDirectory, type AgentSummary, type RouteVars } from './routes.ts'
 import { createMemStore } from './store-mem.ts'
 import { describeRuntime, KIT_ENV_VARS, type Env } from '../worker/env.ts'
 
 type Store = ReturnType<typeof createMemStore>
+
+/** A deployment that closed the picker — the one switch a vertical flips before shipping.
+ *  makeApp's default runtimeConfig has it OPEN, matching the kit's own default. */
+const PICKER_OFF = describeRuntime({ AGENT_PICKER: 'off' } as Env)
+
+const AGENT = (over: Partial<AgentSummary> = {}): AgentSummary => ({
+  agentId: 'agt_bound',
+  name: 'Bound One',
+  workspaceId: 'ws_1',
+  desiredState: 'running',
+  ...over,
+})
 
 function makeApp(
   over: {
@@ -25,6 +37,12 @@ function makeApp(
     recoverPrompt?: RouteVars['recoverPrompt']
     runTurnResult?: boolean
     runtimeConfig?: RouteVars['runtimeConfig']
+    /** What `effectiveAgent()` resolves to (defaults to an unprovisioned per-user agent). */
+    effective?: Awaited<ReturnType<RouteVars['effectiveAgent']>>
+    /** What `listAgents()` resolves to (defaults to the gateway's 404 degraded state). */
+    directory?: AgentDirectory
+    /** Upstream agent lookup: return null for "no such agent", throw for a real failure. */
+    lookup?: (agentId: string) => AgentSummary | null
   } = {},
 ) {
   const store = over.store ?? createMemStore()
@@ -33,6 +51,9 @@ function makeApp(
   const cancelCalls: string[] = []
   const uploadCalls: Array<{ name: string; type: string }> = []
   const answerCalls: Array<[string, Parameters<RouteVars['answerQuestion']>[1]]> = []
+  const lookupCalls: string[] = []
+  const startCalls: string[] = []
+  const lookup = over.lookup ?? ((id: string) => (id === 'agt_bound' ? AGENT() : null))
   const vars: RouteVars = {
     userEmail: over.userEmail ?? 'u@x.com',
     store,
@@ -55,6 +76,16 @@ function makeApp(
     answerQuestion: async (taskId, body) => {
       answerCalls.push([taskId, body])
     },
+    effectiveAgent: async () => over.effective ?? { agentId: null, source: 'per-user', managed: true },
+    listAgents: async () => over.directory ?? { available: false, status: 404, code: 'service_api.not_found' },
+    getAgentSummary: async (agentId) => {
+      lookupCalls.push(agentId)
+      return lookup(agentId)
+    },
+    startAgent: async (agentId) => {
+      startCalls.push(agentId)
+      return lookup(agentId) !== null // upstream 404 → false, exactly what the route reports
+    },
   }
   const root = new Hono<{ Variables: RouteVars }>()
   root.use('*', async (c, next) => {
@@ -66,13 +97,18 @@ function makeApp(
     c.set('recoverPrompt', vars.recoverPrompt)
     c.set('uploadFile', vars.uploadFile)
     c.set('answerQuestion', vars.answerQuestion)
+    c.set('effectiveAgent', vars.effectiveAgent)
+    c.set('listAgents', vars.listAgents)
+    c.set('getAgentSummary', vars.getAgentSummary)
+    c.set('startAgent', vars.startAgent)
     await next()
   })
   root.route('/', app)
-  return { root, store, runTurnCalls, runTurnOpts, cancelCalls, uploadCalls, answerCalls }
+  return { root, store, runTurnCalls, runTurnOpts, cancelCalls, uploadCalls, answerCalls, lookupCalls, startCalls }
 }
 
 const postJson = (body: unknown): RequestInit => ({ method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+const putJson = (body: unknown): RequestInit => ({ ...postJson(body), method: 'PUT' })
 
 test('POST /files → 501 while attachments ship disabled, without calling uploadFile', async () => {
   const { root, uploadCalls } = makeApp()
@@ -218,7 +254,7 @@ test('GET /config reports every declared variable as presence ONLY (no value-bea
   // `apiBaseUrl` (already a raw Env value) stays the single reviewed exception.
   assert.deepEqual(
     Object.keys(body.runtime).sort(),
-    ['apiBaseUrl', 'apiBaseUrlFrom', 'attachments', 'embedGate', 'identity', 'provisioning', 'transport'],
+    ['agentPicker', 'apiBaseUrl', 'apiBaseUrlFrom', 'attachments', 'embedGate', 'identity', 'provisioning', 'transport'],
     'runtime object shape',
   )
 
@@ -265,6 +301,174 @@ test('GET /config derives the deployment mode flags from Env', async () => {
     { t: 'unconfigured', p: 'per-user', i: 'unconfigured', from: 'sdk-default' },
   )
   assert.equal(bare.env.every((e) => e.configured === false), true)
+})
+
+test('the agent picker is ON by default; only an explicit `off` closes it', async () => {
+  // The kit is a template for learning the SDK, so the picker ships open — binding an agent
+  // you already built is the shortest path to seeing listAgents/getAgent/startAgent work.
+  assert.equal(describeRuntime({} as Env).runtime.agentPicker, true)
+  assert.equal(describeRuntime({ ZOOCLAW_API_KEY: 'zct_x', CF_ACCESS_AUD: 'aud' } as Env).runtime.agentPicker, true)
+  assert.equal(describeRuntime({ AGENT_PICKER: 'on' } as Env).runtime.agentPicker, true)
+  // The one switch a vertical flips before shipping to end users (the org key reaches every
+  // agent in the org). Spelling is forgiving; anything else is treated as "leave it on".
+  assert.equal(describeRuntime({ AGENT_PICKER: 'off' } as Env).runtime.agentPicker, false)
+  assert.equal(describeRuntime({ AGENT_PICKER: 'FALSE' } as Env).runtime.agentPicker, false)
+})
+
+// ── agent directory + binding ──────────────────────────────────────────────
+
+test('GET /agent describes the effective agent and enriches it from the upstream lookup', async () => {
+  const { root, lookupCalls } = makeApp({
+    effective: { agentId: 'agt_bound', source: 'binding', managed: false, name: 'stale name' },
+  })
+  const body = (await (await root.request('/agent')).json()) as Record<string, unknown>
+  assert.deepEqual(body, {
+    source: 'binding',
+    agentId: 'agt_bound',
+    name: 'Bound One', // upstream wins over the name captured at bind time
+    desiredState: 'running',
+    editable: false, // THE rule: a borrowed agent is never configured by the kit
+    pickerEnabled: true,
+  })
+  assert.deepEqual(lookupCalls, ['agt_bound'])
+})
+
+test('GET /agent takes `editable` from the resolver’s verdict, never from the source name', async () => {
+  // The rule that stops the kit rewriting somebody else's persona is decided once, in
+  // worker/provision.ts, next to the write it gates. Re-deriving it here (`=== 'per-user'`)
+  // would let the Config tab and the actual write gate drift apart — so feed a source whose
+  // NAME says borrowed and whose verdict says owned, and check which one wins.
+  const { root } = makeApp({ effective: { agentId: 'agt_bound', source: 'binding', managed: true } })
+  assert.equal(((await (await root.request('/agent')).json()) as { editable: boolean }).editable, true)
+})
+
+test('GET /agent on an unprovisioned per-user agent is editable and asks upstream nothing', async () => {
+  const { root, lookupCalls } = makeApp({ effective: { agentId: null, source: 'per-user', managed: true } })
+  const body = (await (await root.request('/agent')).json()) as Record<string, unknown>
+  assert.deepEqual(body, { source: 'per-user', agentId: null, name: null, desiredState: null, editable: true, pickerEnabled: true })
+  // Opening the panel must never provision an agent or touch the API.
+  assert.deepEqual(lookupCalls, [])
+})
+
+test('GET /agent reports a bound agent that no longer exists instead of hiding it', async () => {
+  const { root } = makeApp({ effective: { agentId: 'agt_gone', source: 'binding', managed: false, name: 'Gone' } })
+  const body = (await (await root.request('/agent')).json()) as { name: string; lookupError?: { status: number } }
+  assert.equal(body.lookupError?.status, 404)
+  assert.equal(body.name, 'Gone') // the remembered name is all that is left to show
+})
+
+test('GET /agents passes the gateway’s 404 through as a degraded state, not an error', async () => {
+  // The list route is not forwarded by the public gateway (FEEDBACK #16). Treating that as a
+  // failure would hide the ONE thing the panel needs to know to offer the paste fallback.
+  const { root } = makeApp()
+  const res = await root.request('/agents')
+  assert.equal(res.status, 200)
+  assert.deepEqual(await res.json(), { available: false, status: 404, code: 'service_api.not_found' })
+})
+
+test('GET /agents returns the trimmed directory when the gateway does forward it', async () => {
+  const { root } = makeApp({
+    directory: { available: true, hidden: 0, agents: [AGENT(), AGENT({ agentId: 'agt_two', name: 'Two', workspaceId: null, desiredState: 'stopped' })] },
+  })
+  const body = (await (await root.request('/agents')).json()) as { agents: AgentSummary[] }
+  assert.deepEqual(body.agents.map((a) => a.agentId), ['agt_bound', 'agt_two'])
+  // A row carries only what the picker renders — no persona docs reach the browser.
+  assert.deepEqual(Object.keys(body.agents[0]!).sort(), ['agentId', 'desiredState', 'name', 'workspaceId'])
+})
+
+test('every directory + binding route is 403 while AGENT_PICKER is off', async () => {
+  const { root, store, startCalls } = makeApp({ runtimeConfig: PICKER_OFF })
+  for (const [method, path] of [
+    ['GET', '/agents'],
+    ['GET', '/agents/agt_bound'],
+    ['POST', '/agents/agt_bound/start'],
+    ['PUT', '/binding'],
+    ['DELETE', '/binding'],
+  ] as const) {
+    const res = await root.request(path, method === 'PUT' ? putJson({ agentId: 'agt_bound' }) : { method })
+    assert.equal(res.status, 403, `${method} ${path}`)
+    assert.equal(((await res.json()) as { code: string }).code, 'agent_picker_disabled')
+  }
+  // The gate is not cosmetic: nothing was stored and nothing was started.
+  assert.equal(await store.getAgentBinding('u@x.com'), undefined)
+  assert.deepEqual(startCalls, [])
+})
+
+test('PUT /binding verifies the agent upstream BEFORE storing it, and asks exactly once', async () => {
+  const { root, store, lookupCalls } = makeApp()
+  const res = await root.request('/binding', putJson({ agentId: '  agt_bound  ' }))
+  assert.equal(res.status, 200)
+  // Trimmed, checked before the write — and ONE round-trip: re-resolving to build the
+  // response would ask upstream about the very agent the check just returned.
+  assert.deepEqual(lookupCalls, ['agt_bound'])
+  assert.deepEqual(await res.json(), {
+    source: 'binding',
+    agentId: 'agt_bound',
+    name: 'Bound One',
+    desiredState: 'running',
+    editable: false,
+    pickerEnabled: true,
+  })
+  // The name is captured at bind time so the panel can label the binding without a round-trip.
+  assert.deepEqual(await store.getAgentBinding('u@x.com'), { agentId: 'agt_bound', agentName: 'Bound One' })
+})
+
+test('PUT /binding stores in agent_bindings and never touches the kit-owned agent row', async () => {
+  const store = createMemStore()
+  await store.saveZooclawAgent('u@x.com', 'agt_kit', 'hash')
+  const { root } = makeApp({ store })
+  await root.request('/binding', putJson({ agentId: 'agt_bound' }))
+  // Reusing zooclaw_agents would hand a borrowed agent the config drift gate — and the next
+  // turn would PUT the kit's persona over somebody else's agent.
+  assert.deepEqual(await store.getZooclawAgent('u@x.com'), { agentId: 'agt_kit', configHash: 'hash' })
+})
+
+test('PUT /binding rejects an unknown id, and says so when it looks like a workspace id', async () => {
+  const { root, store } = makeApp()
+  const res = await root.request('/binding', putJson({ agentId: '1fb46466f9be4cc995da37ca1f6bd785' }))
+  assert.equal(res.status, 404)
+  const body = (await res.json()) as { code: string; agentId: string; hint?: string }
+  assert.equal(body.code, 'agent_not_found')
+  assert.equal(body.agentId, '1fb46466f9be4cc995da37ca1f6bd785')
+  // The mistake this field invites: the first segment of a chat URL is an app-layer
+  // workspace id, not the engine's agt_… id.
+  assert.match(body.hint ?? '', /workspace id/)
+  assert.equal(await store.getAgentBinding('u@x.com'), undefined)
+  // A well-formed but unknown agt_… gets the same 404 without the misleading hint.
+  const other = await root.request('/binding', putJson({ agentId: 'agt_nope' }))
+  assert.equal(((await other.json()) as { hint?: string }).hint, undefined)
+})
+
+test('PUT /binding requires an agentId', async () => {
+  const { root } = makeApp()
+  const res = await root.request('/binding', putJson({ agentId: '   ' }))
+  assert.equal(res.status, 400)
+})
+
+test('DELETE /binding clears the row and reports the deployment default again', async () => {
+  const store = createMemStore()
+  await store.saveAgentBinding('u@x.com', 'agt_bound', 'Bound One')
+  const { root } = makeApp({ store, effective: { agentId: 'agt_env', source: 'env-fixed', managed: false } })
+  const res = await root.request('/binding', { method: 'DELETE' })
+  assert.equal(res.status, 200)
+  assert.equal(await store.getAgentBinding('u@x.com'), undefined)
+  assert.equal(((await res.json()) as { source: string }).source, 'env-fixed')
+})
+
+test('POST /agents/:id/start reports an unknown id from the start call itself (no pre-check)', async () => {
+  const { root, startCalls, lookupCalls } = makeApp()
+  assert.equal((await root.request('/agents/agt_nope/start', { method: 'POST' })).status, 404)
+  assert.equal((await root.request('/agents/agt_bound/start', { method: 'POST' })).status, 200)
+  assert.deepEqual(startCalls, ['agt_nope', 'agt_bound'])
+  // One upstream round-trip per press: an existence probe would only ask the same question
+  // the start already answers.
+  assert.deepEqual(lookupCalls, [])
+})
+
+test('GET /agents/:id answers 404 for an unknown id (the paste-fallback check)', async () => {
+  const { root } = makeApp()
+  assert.equal((await root.request('/agents/agt_nope')).status, 404)
+  assert.deepEqual(await (await root.request('/agents/agt_bound')).json(), AGENT())
 })
 
 test('POST /tasks creates the task + first prompt and fires the turn', async () => {

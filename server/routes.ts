@@ -5,6 +5,12 @@
  *
  *   GET  /me                    → { email }
  *   GET  /config                → what this deployment lets you configure (presence only)
+ *   GET  /agent                 → which agent a NEW conversation would use, and why
+ *   GET  /agents                → the org's agents (or an honest "list is unavailable")
+ *   GET  /agents/:id            → one agent, for validating a pasted id
+ *   POST /agents/:id/start      → start a bound agent that is not running
+ *   PUT  /binding               → bind this user to an agent of their own
+ *   DELETE /binding             → drop the binding (back to fixed / per-user)
  *   GET  /tasks                 → the caller's sessions (conversations)
  *   POST /tasks                 → create conversation + first turn
  *   POST /tasks/:id/prompts     → follow-up turn (same Zooclaw session)
@@ -17,7 +23,7 @@
  * (template-layering ②) — which is what makes the whole API unit-testable over the
  * in-memory store with a fake runner.
  */
-import { Hono } from 'hono'
+import { Hono, type Context, type Next } from 'hono'
 import { streamSSE } from 'hono/streaming'
 import type { Store, Task } from './store.ts'
 import { ATTACHMENTS_ENABLED, attachmentPromptSuffix, MAX_UPLOAD_BYTES, type AgentConfig } from '../domain/agent.ts'
@@ -71,8 +77,13 @@ export interface RuntimeConfig {
   runtime: {
     /** How the Worker reaches the ZooClaw API. `unconfigured` → no ZOOCLAW_API_KEY, so no call can be made. */
     transport: 'gateway' | 'unconfigured'
-    /** `fixed-agent` (ZOOCLAW_AGENT_ID: one shared agent, kit provisions nothing) or per-user provisioning. */
+    /** `fixed-agent` (ZOOCLAW_AGENT_ID: one shared agent, kit provisions nothing) or per-user provisioning.
+     *  This is the deployment DEFAULT — a user binding (below) overrides it for that user. */
     provisioning: 'fixed-agent' | 'per-user'
+    /** AGENT_PICKER: may a signed-in user bind an agent of their own? A capability flag, not
+     *  a variable value — see worker/env.ts agentPickerEnabled for why it defaults to
+     *  local-dev-only. The routes below enforce the same boolean. */
+    agentPicker: boolean
     /** Who the Worker believes the caller is (worker/auth.ts). */
     identity: 'cloudflare-access' | 'dev-email' | 'unconfigured'
     /** EMBED_KEY is set → every /api/app/* call must present it. */
@@ -84,6 +95,77 @@ export interface RuntimeConfig {
     apiBaseUrlFrom: 'ZOOCLAW_API_URL' | 'sdk-default'
   }
   env: EnvVarStatus[]
+}
+
+// ── agent directory + binding ──────────────────────────────────────────────
+
+/**
+ * Where the agent for a conversation came from. This is a WIRE value — it ships in the
+ * `GET /agent` body and the panel renders it — so it lives here with the rest of the API
+ * contract, and worker/provision.ts (which decides it) imports it from this layer, the same
+ * direction worker/agent-directory.ts already reads AgentSummary.
+ *
+ * The order below IS the resolution order (worker/provision.ts resolveAgent), and only the
+ * last is an agent this kit created:
+ *
+ *   conversation — pinned on the conversation's first turn (tasks.agent_id). Sessions are
+ *                  agent-scoped, so an open conversation must never move.
+ *   binding      — the user picked one of their own agents (agent_bindings, AGENT_PICKER).
+ *   env-fixed    — ZOOCLAW_AGENT_ID: one pre-built agent shared by the whole deployment.
+ *   per-user     — the kit provisioned it (zooclaw_agents), one per email.
+ */
+export type AgentSource = 'conversation' | 'binding' | 'env-fixed' | 'per-user'
+
+/**
+ * One agent as the panel sees it: the upstream AgentProjection reduced to the four fields
+ * the picker actually renders. The trim matters — a list item carries the agent's ENTIRE
+ * persona doc set, so shipping the raw projection would send kilobytes of somebody's prompt
+ * to the browser for every row. The Worker trims (worker/index.ts), this is the shape.
+ */
+export interface AgentSummary {
+  agentId: string
+  name: string | null
+  /** `declared.labels.workspace_id` — the first path segment of a ZooClaw chat URL, which is
+   *  how a user recognises their agent. NOT every agent carries one, so it may be null. */
+  workspaceId: string | null
+  /** `status.desired_state` — `running` means it can take a message right now. */
+  desiredState: string | null
+}
+
+/**
+ * GET /agents. The `available: false` arm is a FIRST-CLASS state, not an error: the public
+ * gateway does not forward collection-level GET and answers `404 service_api.not_found`
+ * without consulting the engine (SDK note on listAgents; FEEDBACK #16). The panel degrades
+ * to "paste an agent id" instead of showing a broken list, so the route reports the 404
+ * rather than raising it.
+ */
+export type AgentDirectory =
+  | {
+      available: true
+      agents: AgentSummary[]
+      /** Rows the Worker dropped as Agent Builder test runs (worker/agent-directory.ts
+       *  isBuilderTestRun). Reported rather than silently trimmed, so the list still adds up
+       *  against what `listAgents()` returned. */
+      hidden: number
+    }
+  | { available: false; status: number; code?: string }
+
+/** GET /agent — the agent a NEW conversation would use, and what the UI may do about it. */
+export interface EffectiveAgent {
+  /** Which rule picked it (worker/provision.ts resolveAgent). */
+  source: AgentSource
+  /** Null only when provisioning is per-user and the first turn hasn't run yet. */
+  agentId: string | null
+  name: string | null
+  desiredState: string | null
+  /** May the Config tab write this agent's persona / tools / skill? True ONLY for an agent
+   *  the kit created. A borrowed agent belongs to its author and is never PUT. */
+  editable: boolean
+  /** Is the picker live in this deployment (AGENT_PICKER)? */
+  pickerEnabled: boolean
+  /** Set when the upstream lookup for `agentId` failed — e.g. a bound agent that has since
+   *  been deleted. The binding is left alone; the panel shows the problem and offers a reset. */
+  lookupError?: { status: number; message: string }
 }
 
 /** Injected per-request by the composition root. */
@@ -120,6 +202,25 @@ export interface RouteVars {
    *  (worker/index.ts) behind the ATTACHMENTS_ENABLED=false gate below — implement it when
    *  Zooclaw lands production file staging. */
   uploadFile: (file: { name: string; type: string; bytes: ArrayBuffer }) => Promise<FileRef>
+
+  // ── agent directory + binding (worker/provision.ts owns the rules) ────────
+  /** Which agent a NEW conversation would use — a pure lookup that provisions NOTHING, so
+   *  opening the panel never creates an agent or bumps anyone's config_version. `managed` is
+   *  the resolver's own verdict on whether the kit owns this agent (worker/provision.ts);
+   *  this layer reports it rather than re-deriving it, so the Config tab's read-only state
+   *  and the Worker's config-write gate can never disagree. */
+  effectiveAgent: () => Promise<{ agentId: string | null; source: AgentSource; managed: boolean; name?: string | null }>
+  /** The org's agents, already trimmed to AgentSummary. Resolves to `available: false` ONLY
+   *  for the documented gateway 404; any other failure rejects, so a 500 surfaces as an
+   *  error instead of as "paste an id instead" (see AgentDirectory). */
+  listAgents: () => Promise<AgentDirectory>
+  /** One agent, trimmed. `null` when upstream says 404 (unknown id, or not in this org);
+   *  anything else throws so the route can report it honestly instead of as "not found". */
+  getAgentSummary: (agentId: string) => Promise<AgentSummary | null>
+  /** Start an agent that isn't running; false when upstream has no such agent. No credential
+   *  heal — that is the kit's own provisioning path, and a borrowed agent's credentials are
+   *  its author's business. */
+  startAgent: (agentId: string) => Promise<boolean>
 }
 
 export const app = new Hono<{ Variables: RouteVars }>()
@@ -137,6 +238,119 @@ app.get('/me', (c) => c.json({ email: c.var.userEmail }))
 // the composition root hands over an already-reduced RuntimeConfig (presence booleans, no
 // values), so there is no Env in scope here to leak from.
 app.get('/config', (c) => c.json(c.var.runtimeConfig))
+
+// ── agent directory + binding ──────────────────────────────────────────────
+//
+// The picker hands a signed-in user the org key's reach: with it on, they can enumerate the
+// organization's agents and point this deployment at any of them. So every route that reads
+// the directory or writes a binding sits behind the same gate, and the gate is a deployment
+// decision (AGENT_PICKER), never a client claim.
+
+/** 403 body for every gated route below — one shape, so the panel needs one branch. */
+const PICKER_OFF = { error: 'the agent picker is disabled in this deployment', code: 'agent_picker_disabled' } as const
+
+/**
+ * THE gate, as middleware rather than a line each handler has to remember. It guards a real
+ * capability — an org-scoped API key means "list the directory" and "bind anything in it"
+ * reach every agent in the organization — and a per-handler copy cannot enforce "every route
+ * under these paths is gated": route six would ship open. Mounted on the path prefixes, so a
+ * new route is gated by WHERE IT LIVES.
+ */
+app.use('/agents', pickerGate)
+app.use('/agents/*', pickerGate)
+app.use('/binding', pickerGate)
+async function pickerGate(c: Context<{ Variables: RouteVars }>, next: Next): Promise<Response | void> {
+  if (!c.var.runtimeConfig.runtime.agentPicker) return c.json(PICKER_OFF, 403)
+  await next()
+}
+
+/** Resolve + describe the agent a NEW conversation would use. The upstream lookup is
+ *  best-effort: a bound agent that has since been deleted must still render (with its
+ *  error), because the reset button is the only way out of that state. */
+async function describeEffectiveAgent(c: { var: RouteVars }): Promise<EffectiveAgent> {
+  const { effectiveAgent, getAgentSummary, runtimeConfig } = c.var
+  const eff = await effectiveAgent()
+  const base: EffectiveAgent = {
+    source: eff.source,
+    agentId: eff.agentId,
+    name: eff.name ?? null,
+    desiredState: null,
+    // The rule that protects other people's agents, taken from the resolver that also gates
+    // the writes — never re-derived here (see RouteVars.effectiveAgent).
+    editable: eff.managed,
+    pickerEnabled: runtimeConfig.runtime.agentPicker,
+  }
+  if (!eff.agentId) return base // per-user, not provisioned yet — nothing upstream to ask about
+  try {
+    const found = await getAgentSummary(eff.agentId)
+    if (!found) return { ...base, lookupError: { status: 404, message: 'this agent no longer exists on the configured ZooClaw API' } }
+    return { ...base, name: found.name ?? base.name, desiredState: found.desiredState }
+  } catch (e) {
+    return { ...base, lookupError: { status: 0, message: (e as Error).message } }
+  }
+}
+
+app.get('/agent', async (c) => c.json(await describeEffectiveAgent(c)))
+
+app.get('/agents', async (c) => c.json(await c.var.listAgents()))
+
+app.get('/agents/:id', async (c) => {
+  const agentId = c.req.param('id')
+  const found = await c.var.getAgentSummary(agentId)
+  if (!found) return c.json(notFoundBody(agentId), 404)
+  return c.json(found)
+})
+
+app.post('/agents/:id/start', async (c) => {
+  // No existence pre-check: `startAgent` already reports an unknown id, and asking twice
+  // would double the upstream round-trips on a button that is pressed to save time.
+  const agentId = c.req.param('id')
+  if (!(await c.var.startAgent(agentId))) return c.json(notFoundBody(agentId), 404)
+  return c.json({ ok: true })
+})
+
+app.put('/binding', async (c) => {
+  const { agentId } = await c.req.json<{ agentId?: string }>()
+  const id = agentId?.trim()
+  if (!id) return c.json({ error: 'agentId is required' }, 400)
+  // Verify BEFORE storing: a binding to a non-existent agent would fail every later turn
+  // with a much less obvious error, at send time instead of at save time.
+  const found = await c.var.getAgentSummary(id)
+  if (!found) return c.json(notFoundBody(id), 404)
+  await c.var.store.saveAgentBinding(c.var.userEmail, found.agentId, found.name)
+  // Answer from what the check just returned. Re-resolving would re-read the row we wrote
+  // and ask upstream about the very agent we hold in hand; the outcome is not in doubt —
+  // a binding always resolves to itself, and a borrowed agent is never editable.
+  return c.json({
+    source: 'binding',
+    agentId: found.agentId,
+    name: found.name,
+    desiredState: found.desiredState,
+    editable: false,
+    pickerEnabled: c.var.runtimeConfig.runtime.agentPicker,
+  } satisfies EffectiveAgent)
+})
+
+// Unlike PUT, this one must re-resolve: what a user falls back to (env-fixed or their own
+// per-user agent) is exactly the thing the deleted row was hiding.
+app.delete('/binding', async (c) => {
+  await c.var.store.deleteAgentBinding(c.var.userEmail)
+  return c.json(await describeEffectiveAgent(c))
+})
+
+/** A 404 that says what was looked up — and, for the one mistake this UI invites, what the
+ *  user probably pasted instead. The first segment of a ZooClaw chat URL is a WORKSPACE id
+ *  (an app-layer install record), not the `agt_…` engine id this route wants. */
+function notFoundBody(agentId: string): { error: string; code: string; agentId: string; hint?: string } {
+  return {
+    error: `no agent ${agentId} on the configured ZooClaw API`,
+    code: 'agent_not_found',
+    agentId,
+    ...(agentId.startsWith('agt_')
+      ? {}
+      : { hint: 'this does not look like an agent id — the first segment of a ZooClaw chat URL is a workspace id, not the agt_… id' }),
+  }
+}
 
 app.get('/tasks', async (c) => {
   return c.json({ tasks: await c.var.store.listTasksByUser(c.var.userEmail) })

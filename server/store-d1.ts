@@ -8,7 +8,7 @@
  * `wrangler d1 migrations apply`), so this file does no CREATE TABLE at runtime.
  * To target Postgres/MySQL instead, add a sibling store-pg.ts with the same shape.
  */
-import type { Store, Task, Prompt, TaskSummary, ZooclawAgentRow, AttachmentMeta } from './store.ts'
+import type { Store, Task, Prompt, TaskSummary, ZooclawAgentRow, AgentBindingRow, AttachmentMeta } from './store.ts'
 
 export function createD1Store(db: D1Database): Store {
   return {
@@ -38,6 +38,32 @@ export function createD1Store(db: D1Database): Store {
     },
     async setTaskSessionId(id, sessionId) {
       await db.prepare(`UPDATE tasks SET session_id = ? WHERE id = ?`).bind(sessionId, id).run()
+    },
+    async setTaskAgentId(id, agentId) {
+      await db.prepare(`UPDATE tasks SET agent_id = ? WHERE id = ?`).bind(agentId, id).run()
+    },
+
+    async getAgentBinding(userEmail) {
+      const row = await db
+        .prepare(`SELECT agent_id AS agentId, agent_name AS agentName FROM agent_bindings WHERE user_email = ?`)
+        .bind(userEmail)
+        .first<AgentBindingRow>()
+      return row ?? undefined
+    },
+    async saveAgentBinding(userEmail, agentId, agentName) {
+      // Upsert, not INSERT-OR-IGNORE: rebinding to a different agent is the whole feature.
+      await db
+        .prepare(
+          `INSERT INTO agent_bindings (user_email, agent_id, agent_name) VALUES (?, ?, ?)
+             ON CONFLICT(user_email) DO UPDATE SET agent_id = excluded.agent_id,
+                                                  agent_name = excluded.agent_name,
+                                                  updated_at = datetime('now')`,
+        )
+        .bind(userEmail, agentId, agentName)
+        .run()
+    },
+    async deleteAgentBinding(userEmail) {
+      await db.prepare(`DELETE FROM agent_bindings WHERE user_email = ?`).bind(userEmail).run()
     },
 
     async getZooclawAgent(userEmail) {

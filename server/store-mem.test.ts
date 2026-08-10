@@ -34,17 +34,20 @@ test('appendFrame stores a structural clone, not a live reference', async () => 
   assert.deepEqual((await s.framesSince('p', 0)).map((f) => f.data), [{ a: 1 }])
 })
 
-test('task lifecycle: create defaults to running, status/session writes round-trip', async () => {
+test('task lifecycle: create defaults to running, status/session/agent writes round-trip', async () => {
   const s = createMemStore()
   await s.createTask('t1', 'proj', 'a@x.com')
   const fresh = await s.getTask('t1')
   assert.equal(fresh?.status, 'running')
   assert.equal(fresh?.session_id, null) // no Zooclaw session until the first turn creates it
+  assert.equal(fresh?.agent_id, null) // and no agent until that turn resolves one
   await s.setTaskStatus('t1', 'completed')
   await s.setTaskSessionId('t1', 'sess_1')
+  await s.setTaskAgentId('t1', 'agt_1')
   const t = await s.getTask('t1')
   assert.equal(t?.status, 'completed')
   assert.equal(t?.session_id, 'sess_1')
+  assert.equal(t?.agent_id, 'agt_1')
   assert.equal(await s.getTask('missing'), undefined)
 })
 
@@ -85,6 +88,28 @@ test('saveZooclawAgent is INSERT OR IGNORE; setZooclawAgentConfig updates the fi
   await s.setZooclawAgentConfig('a@x.com', 'h9')
   assert.deepEqual(await s.getZooclawAgent('a@x.com'), { agentId: 'agt-1', configHash: 'h9' })
   assert.equal(await s.getZooclawAgent('nobody@x.com'), undefined)
+})
+
+test('agent_bindings UPSERT: rebinding replaces (unlike the INSERT-OR-IGNORE agent row)', async () => {
+  const s = createMemStore()
+  assert.equal(await s.getAgentBinding('a@x.com'), undefined)
+  await s.saveAgentBinding('a@x.com', 'agt_first', 'First')
+  assert.deepEqual(await s.getAgentBinding('a@x.com'), { agentId: 'agt_first', agentName: 'First' })
+  // Rebinding is the feature — last write must win, or the picker could never change agents.
+  await s.saveAgentBinding('a@x.com', 'agt_second', null)
+  assert.deepEqual(await s.getAgentBinding('a@x.com'), { agentId: 'agt_second', agentName: null })
+  await s.deleteAgentBinding('a@x.com')
+  assert.equal(await s.getAgentBinding('a@x.com'), undefined)
+})
+
+test('a binding is per user and never touches the kit-provisioned agent row', async () => {
+  const s = createMemStore()
+  await s.saveZooclawAgent('a@x.com', 'agt_kit', 'hash')
+  await s.saveAgentBinding('a@x.com', 'agt_borrowed', 'Borrowed')
+  // Two tables, two meanings: the drift-gated kit agent must survive a binding untouched,
+  // otherwise the next turn would PUT the kit's config over somebody else's agent.
+  assert.deepEqual(await s.getZooclawAgent('a@x.com'), { agentId: 'agt_kit', configHash: 'hash' })
+  assert.equal(await s.getAgentBinding('b@x.com'), undefined)
 })
 
 test('deleteZooclawAgent forgets the row so a later save is no longer ignored', async () => {

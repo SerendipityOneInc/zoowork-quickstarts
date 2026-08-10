@@ -56,9 +56,13 @@ Out of the box, the demo gives you:
   refresh mid-turn rebuilds losslessly).
 - **Per-user agent, provisioned lazily** — the first turn creates the user's Managed
   Agent, and starts it; later turns reuse it (cached in D1).
-- **Set the system prompt / toggle tools / pin a skill** — edited in the settings pane,
-  applied to the user's agent as persona (`AGENTS.md`) + `tool_policy` + a skill pin,
+- **Set the system prompt / toggle tools / pin a skill** — edited in the panel's Config
+  tab, applied to the user's agent as persona (`AGENTS.md`) + `tool_policy` + a skill pin,
   drift-gated so unchanged config never causes a version-bumping PUT.
+- **Pick which agent you talk to** — the panel's Agent tab lists the agents your key can
+  see and binds one for your next new chat, so trying an agent you built in the ZooClaw app
+  costs no redeploy. On by default; close it with `AGENT_PICKER=off` before shipping to end
+  users — see [Three ways to get an agent](#three-ways-to-get-an-agent).
 - **Human-in-the-loop answer (OUTBOUND half only)** — the answer path is wired: an
   in-chat answer posts a `user.tool_confirmation` event into the session and nudges the
   runner. The INBOUND half is NOT: nothing produces the `__ask` frame the AskCard renders,
@@ -97,17 +101,47 @@ None of these are in `.dev.vars.example`, and none are needed to run the kit. Ad
 
 | | |
 |---|---|
-| `ZOOCLAW_AGENT_ID` | Fixed-agent mode - see [Two ways to get an agent](#two-ways-to-get-an-agent) below. |
+| `ZOOCLAW_AGENT_ID` | Fixed-agent mode - see [Three ways to get an agent](#three-ways-to-get-an-agent) below. |
+| `AGENT_PICKER` | **On by default.** Set `off` to close the panel's **Agent** tab picker, so nobody can rebind and everyone uses the mode below. See the note under [Three ways to get an agent](#three-ways-to-get-an-agent). |
 | `ZOOCLAW_API_URL` | Point at a different deployment. Unset, the SDK uses the public gateway. |
 | `EMBED_KEY` | Shared gate key for embedding. When set, every `/api/app/*` call must present it (`X-Embed-Key` header or `?k=` query) or gets 401. |
 
-### Two ways to get an agent
+### Three ways to get an agent
 
-| | `ZOOCLAW_AGENT_ID` set | unset (default) |
-|---|---|---|
-| what happens | everyone shares that one pre-built agent | each user gets their own agent, created on first use |
-| good for | a demo, or borrowing an agent you built in the app | anything multi-user |
-| needs | just the key | just the key - the gateway seeds the credentials |
+| | user-bound (default) | `ZOOCLAW_AGENT_ID` set | neither |
+|---|---|---|---|
+| what happens | the user picks an agent they already own, in the Agent tab | everyone shares that one pre-built agent | each user gets their own agent, created on first use |
+| good for | trying your own agents against the kit with no redeploy | a demo, or one agent for the whole deployment | anything multi-user |
+| needs | just the key | just the key | just the key - the gateway seeds the credentials |
+
+They are a fallback chain, not alternatives: **binding → `ZOOCLAW_AGENT_ID` → per-user**.
+A binding only affects that user's **next new chat**. Open conversations never move — the
+first turn pins its agent in `tasks.agent_id`, because a Zooclaw session exists only on the
+agent that created it (`migrations/0002`).
+
+Two rules the picker is built around:
+
+- **A borrowed agent is used, never written.** Bound and `ZOOCLAW_AGENT_ID` agents skip
+  every config PUT (`worker/provision.ts`) — they belong to whoever built them, and a PUT
+  would rewrite their persona and bump `config_version`. The Config tab goes read-only to
+  say so. Only the kit's own per-user agent is configurable.
+- **Close the picker before you ship to end users.** `ZOOCLAW_API_KEY` authenticates your
+  whole organization, so with the picker on **any** signed-in user can list and borrow
+  **any** agent in the org. That is the point while you are learning the SDK against your
+  own agents, and wrong once strangers can sign in — `AGENT_PICKER=off` shuts both the
+  routes (403) and the resolver (stored bindings are ignored, so it revokes rather than
+  grandfathers).
+
+> The agent **list** needs the gateway to forward collection-level `GET /agents`. Where it
+> does not, the Agent tab says so and takes a pasted `agt_…` id instead (validated through
+> `getAgent()` before it can be saved) — the picker works either way.
+
+The list drops one kind of row: **Agent Builder test runs** (`pack_test_run_id` /
+`source: agent_builder`), which are throwaway instances carrying the same name, persona and
+skills as the pack they were testing — two identical rows is a worse answer than one. The
+count of what was dropped is shown under the list, and the filter keys on the test-run label
+rather than on a missing `workspace_id`, because the kit's own per-user agents have no
+`workspace_id` either (`worker/agent-directory.ts`).
 
 ## Architecture
 

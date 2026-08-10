@@ -87,6 +87,12 @@ That is the whole setup: **one value to fill in, three commands.** Everything el
 working default - the SDK knows the API endpoint, and the gateway assigns your tenant and
 seeds each new agent's model credentials for you.
 
+That includes **which agent you talk to**: the key alone is enough either way. Send a
+message and the kit creates an agent for you; or open the panel's **Agent** tab first, pick
+one you already built in the ZooClaw app, and it creates nothing. Neither needs
+`ZOOCLAW_AGENT_ID` - that variable is for pinning ONE agent for every user of a deployment,
+not for trying your own.
+
 `DEV_EMAIL` in the example file stands in for Cloudflare Access so you are signed in
 locally. Leave it out in production: without it, and without Access configured, every
 request is rejected.
@@ -101,7 +107,7 @@ None of these are in `.dev.vars.example`, and none are needed to run the kit. Ad
 
 | | |
 |---|---|
-| `ZOOCLAW_AGENT_ID` | Fixed-agent mode - see [Three ways to get an agent](#three-ways-to-get-an-agent) below. |
+| `ZOOCLAW_AGENT_ID` | Fixed-agent mode: pins ONE agent for every user of this deployment. You do **not** need it to use an agent you built yourself - the Agent tab binds one per user, without a redeploy. See [Three ways to get an agent](#three-ways-to-get-an-agent) below. |
 | `AGENT_PICKER` | **On by default.** Set `off` to close the panel's **Agent** tab picker, so nobody can rebind and everyone uses the mode below. See the note under [Three ways to get an agent](#three-ways-to-get-an-agent). |
 | `ZOOCLAW_API_URL` | Point at a different deployment. Unset, the SDK uses the public gateway. |
 | `EMBED_KEY` | Shared gate key for embedding. When set, every `/api/app/*` call must present it (`X-Embed-Key` header or `?k=` query) or gets 401. |

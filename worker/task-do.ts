@@ -324,13 +324,30 @@ export class TaskDO extends DurableObject<Env> {
         // prompt as initial user.message); follow-ups post events into it.
         let agentId = await this.ctx.storage.get<string>('agentId')
         let sessionId = await this.ctx.storage.get<string>('sessionId')
-        if (!sessionId) sessionId = (await this.store.getTask(t.taskId))?.session_id ?? undefined
-
-        if (!agentId) {
-          // Provision (or reuse) this user's agent and apply this session's agent config.
-          const provisioned = await agentFor(this.store, client, t.userEmail, provisionConfig(this.env), t.agentConfig ?? defaultAgentConfig())
+        // DO storage is the fast path for both ids; tasks.agent_id is the DURABLE copy the
+        // rest of the Worker reads (a tool confirmation resolves its target agent from
+        // there — worker/index.ts), and `agentPinned` records that the two agree.
+        //
+        // That third flag is what makes the mirror happen exactly once AND still happen for
+        // a conversation that started before the column existed: its DO already knows the
+        // agent, so an "only when a copy is missing" check would skip it forever, and the
+        // confirmation path would then fall back to resolving — landing on the user's CURRENT
+        // binding rather than the agent this conversation's session actually lives on.
+        if (!agentId || !sessionId || !(await this.ctx.storage.get<boolean>('agentPinned'))) {
+          const task = await this.store.getTask(t.taskId)
+          if (!sessionId) sessionId = task?.session_id ?? undefined
+          // Hand the conversation's PIN to the resolver rather than short-circuiting it
+          // here: the four-rung ladder (conversation → binding → env-fixed → per-user) lives
+          // in ONE place, and this file does not get its own copy of the top rung. A pinned
+          // agent returns immediately — no upstream call, no config write.
+          const provisioned = await agentFor(this.store, client, t.userEmail, provisionConfig(this.env), t.agentConfig ?? defaultAgentConfig(), {
+            pinnedAgentId: agentId ?? task?.agent_id,
+          })
+          if (provisioned.agentId !== agentId) console.log(`[provision] conversation ${t.taskId} → ${provisioned.agentId} (${provisioned.source})`)
           agentId = provisioned.agentId
           await this.ctx.storage.put('agentId', agentId)
+          if (task?.agent_id !== agentId) await this.store.setTaskAgentId(t.taskId, agentId)
+          await this.ctx.storage.put('agentPinned', true)
         }
 
         // Last ownership check before the outbound send: a cancel() during the (long)

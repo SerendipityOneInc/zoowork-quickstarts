@@ -8,7 +8,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { agentFor, ensureAgentConfig, hashAgentConfig, configMark, ownershipFor, type ProvisionConfig } from './provision.ts'
+import { agentFor, ensureAgentConfig, hashAgentConfig, configMark, ownershipFor, resolveAgent, type ProvisionConfig } from './provision.ts'
 import { createMemStore } from '../server/store-mem.ts'
 import { ZooclawError, type ZooclawClient } from '@zooclaw-agents/sdk'
 import { AGENT_MODEL, type AgentConfig } from '../domain/agent.ts'
@@ -90,6 +90,98 @@ function fakeZooclawApi(opts: FakeOpts = {}) {
   } as unknown as ZooclawClient
   return { client, calls, bodies, idemKeys, idemKey: () => idemKeys[idemKeys.length - 1] }
 }
+
+// ── resolution order: conversation → binding → env-fixed → per-user ────────
+
+/** A store with every source populated, so each test can prove which one WINS rather than
+ *  which one merely works. */
+async function storeWithEverything() {
+  const store = createMemStore()
+  await store.saveAgentBinding('u@x.com', 'agt-bound', 'Bound One')
+  await store.saveZooclawAgent('u@x.com', 'agt-own', 'hash')
+  return store
+}
+const PICKER: ProvisionConfig = { ...CFG, agentPicker: true, fixedAgentId: 'agt-env' }
+
+test('resolveAgent: the conversation pin outranks every other source', async () => {
+  const store = await storeWithEverything()
+  // Sessions are agent-scoped: an open conversation whose agent moved would send its
+  // follow-ups to an agent where its session id does not exist.
+  assert.deepEqual(await resolveAgent(store, 'u@x.com', PICKER, 'agt-pinned'), {
+    agentId: 'agt-pinned',
+    source: 'conversation',
+    managed: false,
+  })
+})
+
+test('resolveAgent: a user binding outranks ZOOCLAW_AGENT_ID and the kit’s own agent', async () => {
+  const store = await storeWithEverything()
+  assert.deepEqual(await resolveAgent(store, 'u@x.com', PICKER), {
+    agentId: 'agt-bound',
+    source: 'binding',
+    managed: false,
+    name: 'Bound One',
+  })
+})
+
+test('resolveAgent: AGENT_PICKER off ignores a stored binding entirely (it revokes, not grandfathers)', async () => {
+  const store = await storeWithEverything()
+  const off = { ...PICKER, agentPicker: false }
+  assert.equal((await resolveAgent(store, 'u@x.com', off)).source, 'env-fixed')
+  // …and with no fixed agent either, it falls all the way through to the kit's own.
+  const { agentId, source, managed } = await resolveAgent(store, 'u@x.com', { ...off, fixedAgentId: undefined })
+  assert.deepEqual({ agentId, source, managed }, { agentId: 'agt-own', source: 'per-user', managed: true })
+})
+
+test('resolveAgent: per-user is the floor, and reports null before the first turn provisions', async () => {
+  const store = createMemStore()
+  assert.deepEqual(await resolveAgent(store, 'u@x.com', CFG), { agentId: null, source: 'per-user', managed: true })
+})
+
+test('resolveAgent: only the kit’s own agent is `managed` — the licence to write config', async () => {
+  const store = await storeWithEverything()
+  const sources = await Promise.all([
+    resolveAgent(store, 'u@x.com', PICKER, 'agt-pinned'),
+    resolveAgent(store, 'u@x.com', PICKER),
+    resolveAgent(store, 'u@x.com', { ...PICKER, agentPicker: false }),
+    resolveAgent(store, 'u@x.com', CFG),
+  ])
+  assert.deepEqual(sources.map((r) => [r.source, r.managed]), [
+    ['conversation', false],
+    ['binding', false],
+    ['env-fixed', false],
+    ['per-user', true],
+  ])
+})
+
+test('a BOUND agent is used and never written: zero API calls, and the kit’s own row untouched', async () => {
+  // The safety property the whole feature rests on. The bound agent belongs to a real user;
+  // a config PUT here would silently rewrite their persona and bump config_version.
+  const store = await storeWithEverything()
+  const { client, calls } = fakeZooclawApi()
+  const config: AgentConfig = { systemPrompt: 'kit prompt', tools: {}, skillId: 'skl_x' }
+
+  const got = await agentFor(store, client, 'u@x.com', PICKER, config)
+  assert.deepEqual(got, { agentId: 'agt-bound', source: 'binding', managed: false })
+  assert.deepEqual(calls, []) // no create, no credentials, no start, and above all no put-config
+  assert.deepEqual(await store.getZooclawAgent('u@x.com'), { agentId: 'agt-own', configHash: 'hash' })
+})
+
+test('a CONVERSATION-pinned agent is used as-is, whatever the user has since bound', async () => {
+  const store = await storeWithEverything()
+  const { client, calls } = fakeZooclawApi()
+  const got = await agentFor(store, client, 'u@x.com', PICKER, undefined, { pinnedAgentId: 'agt-pinned' })
+  assert.deepEqual(got, { agentId: 'agt-pinned', source: 'conversation', managed: false })
+  assert.deepEqual(calls, [])
+})
+
+test('fixed-agent mode still provisions and configures nothing', async () => {
+  const store = createMemStore()
+  const { client, calls } = fakeZooclawApi()
+  const got = await agentFor(store, client, 'u@x.com', { ...CFG, fixedAgentId: 'agt-env' }, { systemPrompt: 'x', tools: {} })
+  assert.deepEqual(got, { agentId: 'agt-env', source: 'env-fixed', managed: false })
+  assert.deepEqual(calls, [])
+})
 
 test('fresh path: create (stable idempotency key) → both platform credentials → start → row saved', async () => {
   const store = createMemStore()

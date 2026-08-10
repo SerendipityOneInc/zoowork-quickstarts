@@ -10,7 +10,7 @@
  *  - `appendFrame` round-trips data through JSON, mirroring D1 storing it as a JSON string
  *    (so a stored frame is a structural clone, never a live reference).
  */
-import type { Store, Task, Prompt, TaskSummary, ZooclawAgentRow, Frame, AttachmentMeta } from './store.ts'
+import type { Store, Task, Prompt, TaskSummary, ZooclawAgentRow, AgentBindingRow, Frame, AttachmentMeta } from './store.ts'
 
 interface TaskRow extends Task {
   ord: number
@@ -26,6 +26,7 @@ export function createMemStore(): Store {
   const prompts = new Map<string, PromptRow>()
   const frames = new Map<string, Frame[]>()
   const agents = new Map<string, ZooclawAgentRow>()
+  const bindings = new Map<string, AgentBindingRow>()
   const attachments = new Map<string, { userEmail: string; filename: string; contentType: string; thumb: ArrayBuffer | null; large: ArrayBuffer | null }>()
   const promptFiles = new Map<string, string[]>()
 
@@ -34,6 +35,7 @@ export function createMemStore(): Store {
     project_id: t.project_id,
     status: t.status,
     session_id: t.session_id,
+    agent_id: t.agent_id,
     user_email: t.user_email,
     created_at: t.created_at,
   })
@@ -53,7 +55,7 @@ export function createMemStore(): Store {
   return {
     async createTask(id, projectId, userEmail) {
       if (tasks.has(id)) return
-      tasks.set(id, { id, project_id: projectId, status: 'running', session_id: null, user_email: userEmail, created_at: now(), ord: ord++ })
+      tasks.set(id, { id, project_id: projectId, status: 'running', session_id: null, agent_id: null, user_email: userEmail, created_at: now(), ord: ord++ })
     },
     async getTask(id) {
       const t = tasks.get(id)
@@ -72,6 +74,21 @@ export function createMemStore(): Store {
     async setTaskSessionId(id, sessionId) {
       const t = tasks.get(id)
       if (t) t.session_id = sessionId
+    },
+    async setTaskAgentId(id, agentId) {
+      const t = tasks.get(id)
+      if (t) t.agent_id = agentId
+    },
+
+    async getAgentBinding(userEmail) {
+      const b = bindings.get(userEmail)
+      return b ? { agentId: b.agentId, agentName: b.agentName } : undefined
+    },
+    async saveAgentBinding(userEmail, agentId, agentName) {
+      bindings.set(userEmail, { agentId, agentName }) // upsert: rebinding replaces
+    },
+    async deleteAgentBinding(userEmail) {
+      bindings.delete(userEmail)
     },
 
     async getZooclawAgent(userEmail) {

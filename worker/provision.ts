@@ -15,6 +15,10 @@
  * + the in-memory store — only the real the ZooClaw API HTTP needs a live deployment.
  */
 import type { Store } from '../server/store.ts'
+// TYPE-ONLY (erased — verbatimModuleSyntax). `AgentSource` is a WIRE value: it ships in the
+// GET /agent body and the panel renders it, so the API layer declares it and this file, which
+// merely decides it, reads it from there.
+import type { AgentSource } from '../server/routes.ts'
 import { ZooclawError, type ZooclawClient, type AgentResource, type AgentRecord, type Ownership } from '@zooclaw-agents/sdk'
 import { AGENT_INSTRUCTION, AGENT_MODEL, buildToolPolicy, type AgentConfig } from '../domain/agent.ts'
 
@@ -33,6 +37,13 @@ export interface ProvisionConfig {
   /** FIXED-AGENT MODE (ZOOCLAW_AGENT_ID): use this pre-built agent for everyone and
    *  provision nothing. See `agentFor` for what that skips and why. */
   fixedAgentId?: string
+  /** AGENT_PICKER: may a signed-in user bind this deployment to an agent of their own
+   *  (agent_bindings)? On by default in the kit; a vertical shipping to end users sets
+   *  `AGENT_PICKER=off`, because the API key is ORG-scoped and the picker hands its reach to
+   *  whoever can sign in (worker/env.ts agentPickerEnabled). Off ALSO ignores bindings
+   *  already stored, so closing it actually revokes the capability instead of
+   *  grandfathering it. */
+  agentPicker?: boolean
   /** GATEWAY MODE: the public `/service/v1` gateway seeds both platform credentials
    *  itself on a successful create, and blocks `credentials/*` with a 404. So the kit
    *  must NOT write them — the litellmKey/userInternalToken above are unused, and an
@@ -43,6 +54,55 @@ export interface ProvisionConfig {
 
 export interface ProvisionedAgent {
   agentId: string
+  source: AgentSource
+  /** THE safety bit. True only for an agent this kit created, and it is the sole licence to
+   *  PUT declared config (persona / tool_policy / skill). Every other source is somebody
+   *  else's agent — borrowed for chat, never rewritten. `GET /agent` reports this verbatim
+   *  as `editable`, so the Config tab and the write gate cannot disagree. */
+  managed: boolean
+}
+
+/**
+ * What resolveAgent found, before any provisioning happens. A UNION, not a flat record, so
+ * two invariants hold by type rather than by comment: a borrowed agent always HAS an id (it
+ * was named by a pin, a row or an env var), and `managed` is welded to the one source that
+ * earns it. `if (!resolved.managed)` therefore narrows `agentId` to `string` on its own.
+ */
+export type AgentResolution =
+  | {
+      agentId: string
+      source: Exclude<AgentSource, 'per-user'>
+      managed: false
+      /** Display name, when the source recorded one (bindings capture it at bind time). */
+      name?: string | null
+    }
+  | {
+      /** Null before the first turn has created one — the only case where it can be. */
+      agentId: string | null
+      source: 'per-user'
+      managed: true
+    }
+
+/**
+ * Which agent a turn should use — a PURE LOOKUP: no network, no provisioning, no writes.
+ * Shared by the turn path (agentFor), the tool-confirmation path (worker/index.ts) and the
+ * panel's "which agent am I on?" route, so all three agree by construction.
+ */
+export async function resolveAgent(store: Store, email: string, cfg: ProvisionConfig, pinnedAgentId?: string | null): Promise<AgentResolution> {
+  // 1. This conversation already has an agent. Nothing may override it: its Zooclaw session
+  //    lives on THAT agent, and a follow-up sent elsewhere gets `session not found`.
+  if (pinnedAgentId) return { agentId: pinnedAgentId, source: 'conversation', managed: false }
+  // 2. The user's own pick. Skipped entirely when the picker is disabled, so flipping
+  //    AGENT_PICKER off revokes existing bindings rather than grandfathering them.
+  if (cfg.agentPicker) {
+    const bound = await store.getAgentBinding(email)
+    if (bound) return { agentId: bound.agentId, source: 'binding', managed: false, name: bound.agentName }
+  }
+  // 3. The deployment-wide fixed agent.
+  if (cfg.fixedAgentId) return { agentId: cfg.fixedAgentId, source: 'env-fixed', managed: false }
+  // 4. The kit's own per-user agent (null until the first turn provisions it).
+  const own = await store.getZooclawAgent(email)
+  return { agentId: own?.agentId ?? null, source: 'per-user', managed: true }
 }
 
 /** The verified-user → ownership-anchor mapping. the ZooClaw API treats these as opaque data
@@ -228,31 +288,46 @@ async function createFreshAgent(client: ZooclawClient, email: string, cfg: Provi
 }
 
 /**
- * The per-turn entry point: return the user's ready-to-chat agent id, provisioning on
- * first use. Reuse path verifies the cached id still exists on THIS the ZooClaw API (a 404 →
- * drop the row and re-provision; any other error is rethrown so a blip never discards a
- * good agent) and re-starts it if it isn't running. Fresh path: create → credentials →
- * start (createFreshAgent).
+ * The per-turn entry point: return the ready-to-chat agent for this turn, provisioning on
+ * first use.
+ *
+ * resolveAgent picks the source; what happens next depends entirely on whether the kit owns
+ * the agent:
+ *
+ *   BORROWED (conversation / binding / env-fixed) — used as-is. No create, no credential
+ *     writes, and deliberately NO ensureAgentConfig: that agent belongs to a real user, and
+ *     PUTting the kit's persona/tool_policy over it would silently rewrite their agent (and
+ *     bump config_version on every call). Sessions are still per-conversation, so borrowing
+ *     one does not mix conversations. `managed: false` is what the UI reads to disable the
+ *     Config tab.
+ *
+ *   PER-USER — the kit's own agent. Reuse path verifies the cached id still exists on THIS
+ *     the ZooClaw API (a 404 → drop the row and re-provision; any other error is rethrown so
+ *     a blip never discards a good agent) and re-starts it if it isn't running. Fresh path:
+ *     create → credentials → start (createFreshAgent). Only here is config applied.
  */
-export async function agentFor(store: Store, client: ZooclawClient, email: string, cfg: ProvisionConfig, config?: AgentConfig): Promise<ProvisionedAgent> {
-  // FIXED-AGENT MODE: a pre-built agent from the ZooClaw app, borrowed as-is. Nothing here
-  // is provisioning — no create, no credential writes, and deliberately NO ensureAgentConfig
-  // below: that agent belongs to a real user, and PUTting the kit's persona/tool_policy
-  // over it would silently rewrite their agent (and bump config_version on every call).
-  // Sessions are still per-conversation, so borrowing it does not mix conversations.
-  if (cfg.fixedAgentId) return { agentId: cfg.fixedAgentId }
+export async function agentFor(
+  store: Store,
+  client: ZooclawClient,
+  email: string,
+  cfg: ProvisionConfig,
+  config?: AgentConfig,
+  opts?: { pinnedAgentId?: string | null },
+): Promise<ProvisionedAgent> {
+  const resolved = await resolveAgent(store, email, cfg, opts?.pinnedAgentId)
+  // The union narrows here: a borrowed agent always has an id, so there is nothing to assert.
+  if (!resolved.managed) return { agentId: resolved.agentId, source: resolved.source, managed: false }
 
   let agentId: string | undefined
 
-  const existing = await store.getZooclawAgent(email)
-  if (existing?.agentId) {
+  if (resolved.agentId) {
     try {
-      const agent = await client.getAgent(existing.agentId)
-      agentId = existing.agentId
+      const agent = await client.getAgent(resolved.agentId)
+      agentId = resolved.agentId
       if (agent.status?.desired_state !== 'running') await startWithCredentialHeal(client, agentId, cfg)
     } catch (e) {
       if (e instanceof ZooclawError && e.status === 404) {
-        console.log(`[provision] cached agent ${existing.agentId} not found on this the ZooClaw API — reprovisioning`)
+        console.log(`[provision] cached agent ${resolved.agentId} not found on this the ZooClaw API — reprovisioning`)
         await store.deleteZooclawAgent(email)
       } else {
         throw e
@@ -281,5 +356,5 @@ export async function agentFor(store: Store, client: ZooclawClient, email: strin
     }
   }
 
-  return { agentId }
+  return { agentId, source: 'per-user', managed: true }
 }

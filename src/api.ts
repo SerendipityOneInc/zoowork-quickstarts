@@ -2,19 +2,43 @@ import type { AgentConfig } from '../domain/agent.ts'
 // TYPE-ONLY (erased at build — verbatimModuleSyntax): the runtime description is an API
 // response contract, so the client reads the server's definition instead of keeping a
 // second copy that could drift. No server code enters the browser bundle.
-import type { RuntimeConfig } from '../server/routes.ts'
+import type { AgentDirectory, AgentSummary, EffectiveAgent, RuntimeConfig } from '../server/routes.ts'
 
-export type { EnvVarStatus, RuntimeConfig } from '../server/routes.ts'
+export type { AgentDirectory, AgentSummary, EffectiveAgent, EnvVarStatus, RuntimeConfig } from '../server/routes.ts'
 
 const BASE = '/api/app'
 
+/** An HTTP failure that kept the server's JSON body — the agent routes answer 404 and 403
+ *  with an explanation (which id, what to try instead), and throwing it away would leave the
+ *  panel showing a bare status code for exactly the mistakes it exists to catch. */
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+    readonly body: Record<string, unknown> = {},
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+  /** The server's `hint`, when it sent one (see routes.ts notFoundBody). */
+  get hint(): string | null {
+    return typeof this.body.hint === 'string' ? this.body.hint : null
+  }
+}
+
 async function json<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`${BASE}${path}`, init)
-  if (!r.ok) throw new Error(`${init?.method ?? 'GET'} ${path} failed: ${r.status}`)
+  if (!r.ok) {
+    const body = (await r.json().catch(() => ({}))) as Record<string, unknown>
+    const detail = typeof body.error === 'string' ? body.error : `${init?.method ?? 'GET'} ${path} failed: ${r.status}`
+    throw new ApiError(r.status, detail, body)
+  }
   return r.json() as Promise<T>
 }
-const postJson = <T>(path: string, body: unknown): Promise<T> =>
-  json<T>(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+/** One JSON sender for every write. A body is optional — DELETE carries none. */
+const sendJson = <T>(method: 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> =>
+  json<T>(path, { method, ...(body === undefined ? {} : { headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) })
+const postJson = <T>(path: string, body: unknown): Promise<T> => sendJson<T>('POST', path, body)
 
 /** Server-sent attachment metadata; the rendition URLs are derived client-side (see toAttachment). */
 export interface AttachmentMeta {
@@ -61,6 +85,30 @@ export const getMe = (): Promise<{ email: string }> => json('/me')
  *  presence-only status per env var. Never carries a secret VALUE — see server/routes.ts
  *  RuntimeConfig and the leak test in server/routes.test.ts. */
 export const getConfig = (): Promise<RuntimeConfig> => json('/config')
+
+// ── agent directory + binding (the Agent tab) ──────────────────────────────
+
+/** Which agent the NEXT new chat will use, where that choice came from, and whether this
+ *  deployment lets the user change it. Open conversations are unaffected — they stay pinned
+ *  to the agent they started on. */
+export const getEffectiveAgent = (): Promise<EffectiveAgent> => json('/agent')
+
+/** The org's agents. Resolves — never rejects — to `{ available: false }` when the gateway
+ *  does not forward collection-level GET, which is the picker's degraded (paste-an-id) mode. */
+export const listAgents = (): Promise<AgentDirectory> => json('/agents')
+
+/** Validate a pasted `agt_…` before saving it. Rejects with an ApiError carrying the
+ *  server's hint when the id looks like a workspace id instead. */
+export const getAgent = (agentId: string): Promise<AgentSummary> => json(`/agents/${encodeURIComponent(agentId)}`)
+
+/** Bind this user to `agentId` (validated server-side first). Returns the new effective agent. */
+export const bindAgent = (agentId: string): Promise<EffectiveAgent> => sendJson('PUT', '/binding', { agentId })
+
+/** Drop the binding — back to the deployment default (fixed agent or per-user). */
+export const unbindAgent = (): Promise<EffectiveAgent> => sendJson('DELETE', '/binding')
+
+/** Start a bound agent that is not running. */
+export const startAgent = (agentId: string): Promise<{ ok: boolean }> => postJson(`/agents/${encodeURIComponent(agentId)}/start`, {})
 
 /** The caller's sessions (newest first). */
 export async function listSessions(): Promise<SessionSummary[]> {

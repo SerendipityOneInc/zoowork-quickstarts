@@ -8,6 +8,10 @@ export const queryKeys = {
   config: () => ['config'] as const,
   sessions: () => ['sessions'] as const,
   taskContent: (taskId: string) => ['taskContent', taskId] as const,
+  /** The agent the NEXT new chat would use (GET /agent). Invalidated by bind/unbind/start. */
+  effectiveAgent: () => ['effectiveAgent'] as const,
+  /** The org's agent directory (GET /agents) — or its documented unavailable state. */
+  agentDirectory: () => ['agentDirectory'] as const,
 }
 
 /** Enable conditions for queries whose params may be absent. */

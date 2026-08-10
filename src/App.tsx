@@ -5,14 +5,13 @@ import { useSessions } from './hooks/useSessions.ts'
 import { useConversation } from './hooks/useConversation.ts'
 import { useSendMessage } from './hooks/useSendMessage.ts'
 import { useAnswer } from './hooks/useAnswer.ts'
-import { configAtom, debugAtom, navOpenAtom, newSessionAtom, openSessionAtom, taskIdAtom, themeAtom } from './store/ui.ts'
+import { debugAtom, navOpenAtom, newSessionAtom, openSessionAtom, taskIdAtom, themeAtom } from './store/ui.ts'
 import { busyTasksAtom } from './store/conversation.ts'
 import { ChatPanel } from './components/ChatPanel.tsx'
 import { Composer } from './components/Composer.tsx'
 import { Sidebar } from './components/Sidebar.tsx'
-import { SettingsPanel } from './components/SettingsPanel.tsx'
-// The right-hand pane is the business seam. By default it's the DebugPanel; replace it
-// in domain/view.tsx with your domain cards.
+// The right-hand pane is the business seam. By default it's the four-tab agent panel
+// (Agent / Config / Runtime / Debug); replace it in domain/view.tsx with your domain cards.
 import { Bench } from '../domain/view.tsx'
 
 // Brand shown in the sidebar (and the mobile bar). A vertical sets its own.
@@ -33,7 +32,6 @@ export function App() {
   const send = useSendMessage()
   const answer = useAnswer()
 
-  const [config, setConfig] = useAtom(configAtom)
   const [theme, setTheme] = useAtom(themeAtom)
   const [navOpen, setNavOpen] = useAtom(navOpenAtom)
   const [pane, setPane] = useState<'chat' | 'bench'>('chat') // mobile: which pane is visible
@@ -98,7 +96,6 @@ export function App() {
           </section>
           {debug && (
             <section className="right">
-              <SettingsPanel config={config} onChange={setConfig} appliesToNewChat={!!taskId} />
               <Bench prompts={prompts} />
             </section>
           )}

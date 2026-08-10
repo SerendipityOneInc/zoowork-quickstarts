@@ -1,104 +1,77 @@
 import { useState } from 'react'
-import { useAtomValue } from 'jotai'
+import { useAtom } from 'jotai'
 import type { PromptContent, RuntimeConfig } from '../api.ts'
 import { useConfig } from '../hooks/useConfig.ts'
+import { useEffectiveAgent } from '../hooks/useAgent.ts'
 import { configAtom } from '../store/agent-config.ts'
 import { buildToolPolicy, TOOLS } from '../../domain/agent.ts'
+import { AgentPanel } from './AgentPanel.tsx'
+import { SettingsPanel } from './SettingsPanel.tsx'
+import { IdRow, Knob, Section, jumpTo } from './panel-bits.tsx'
 
 /**
- * The default right-hand pane, in two tabs.
+ * The right-hand pane, in four tabs — one per capability surface of the SDK, so "what can I
+ * actually do here?" has a tab rather than a scroll position:
  *
- *   Config — what you can actually control: this deployment's mode + wired variables (from
- *            GET /api/app/config, presence only — no secret value is ever sent to the
- *            browser), the agent config the settings pane edits, and this conversation's
- *            live ids. Plus an honest list of what the kit does NOT let you change.
- *   Frames — the raw inspector: every turn's prompt and the stream-json frames the backend
- *            stored, including the `__zooclaw` typed-event passthroughs chat hides.
+ *   Agent   — which agent this deployment talks to, and (when allowed) a picker to change it.
+ *   Config  — the agent config the kit applies: persona, tool toggles, skill pin. Read-only
+ *             for a borrowed agent, because that agent belongs to somebody else.
+ *   Runtime — how this deployment is wired (transport, identity, variables). Redeploy to change.
+ *   Debug   — the raw frame stream, including the `__zooclaw` passthroughs chat hides.
  *
- * Config leads because a newcomer's first question is "what am I allowed to change, and
- * where does it land?" — the frame dump answers neither. There is no public console for a
- * Zooclaw session, so raw ids (monospace, click-to-copy) ARE the debugging affordance.
+ * Agent leads: everything else in the pane is qualified by WHICH agent you are on, and until
+ * this tab existed that answer was buried in a marker frame. Each section names the SDK
+ * methods behind it (see panel-bits Section) — the kit is a teaching probe for the SDK, so a
+ * reader should get from a control to a call without leaving the pane.
+ *
  * Replace the whole pane via domain/view.tsx.
  */
+type Tab = 'agent' | 'config' | 'runtime' | 'debug'
+
 export function DebugPanel({ prompts }: { prompts: PromptContent[] }) {
-  const [tab, setTab] = useState<'config' | 'frames'>('config')
+  const [tab, setTab] = useState<Tab>('agent')
   const frameCount = prompts.reduce((n, p) => n + p.frames.length, 0)
+  const tabButton = (id: Tab, label: string, extra?: React.ReactNode) => (
+    <button role="tab" aria-selected={tab === id} className={tab === id ? 'active' : ''} onClick={() => setTab(id)}>
+      {label}
+      {extra}
+    </button>
+  )
   return (
     <div className="bench">
-      <div className="bench-tabs" role="tablist" aria-label="Debug panel">
-        <button role="tab" aria-selected={tab === 'config'} className={tab === 'config' ? 'active' : ''} onClick={() => setTab('config')}>
-          Config
-        </button>
-        <button role="tab" aria-selected={tab === 'frames'} className={tab === 'frames' ? 'active' : ''} onClick={() => setTab('frames')}>
-          Frames <span className="bench-tab-count">{frameCount}</span>
-        </button>
+      <div className="bench-tabs" role="tablist" aria-label="Agent panel">
+        {tabButton('agent', 'Agent')}
+        {tabButton('config', 'Config')}
+        {tabButton('runtime', 'Runtime')}
+        {tabButton('debug', 'Debug', <span className="bench-tab-count">{frameCount}</span>)}
       </div>
-      {tab === 'config' ? <ConfigTab prompts={prompts} /> : <FramesTab prompts={prompts} />}
+      {tab === 'agent' && <AgentTab prompts={prompts} />}
+      {tab === 'config' && <ConfigTab hasConversation={prompts.length > 0} />}
+      {tab === 'runtime' && <RuntimeTab />}
+      {tab === 'debug' && <FramesTab prompts={prompts} />}
     </div>
   )
 }
 
-// ── Config tab ─────────────────────────────────────────────────────────────
+// ── Agent tab ──────────────────────────────────────────────────────────────
 
-function ConfigTab({ prompts }: { prompts: PromptContent[] }) {
-  const runtime = useConfig()
-  const config = useAtomValue(configAtom)
+/** The picker (AgentPanel) plus this conversation's live ids — both answer "which agent /
+ *  session am I actually on", one for the next chat and one for the open one. */
+function AgentTab({ prompts }: { prompts: PromptContent[] }) {
   const id = conversationIdentity(prompts)
-  const policy = JSON.stringify(buildToolPolicy(config.tools))
-  const toolsOn = TOOLS.filter((t) => config.tools[t.key] ?? t.defaultOn)
-
   return (
     <div className="cfg">
-      <section className="cfg-section">
-        <h3 className="cfg-title">Runtime</h3>
-        <p className="cfg-caption muted">
-          How this deployment is wired. Read-only — it comes from the Worker's environment, so changing it means a redeploy.
-        </p>
-        {runtime.isPending && <div className="muted">Loading…</div>}
-        {runtime.isError && <div className="cfg-empty">GET /api/app/config failed — the Worker may not be running.</div>}
-        {runtime.data && <RuntimeRows config={runtime.data} />}
-      </section>
-
-      <section className="cfg-section">
-        <h3 className="cfg-title">Agent config you can edit right now</h3>
-        <p className="cfg-caption muted">Edited in the settings pane above; applied to your Zooclaw agent on the first turn of a session.</p>
-
-        <Knob
-          name="System prompt"
-          value={config.systemPrompt.trim() || '(empty)'}
-          where="Settings · System prompt"
-          lands="PUT /agents/{id} · persona.docs[AGENTS.md]"
-          onEdit={() => jumpTo('sys-prompt')}
-        />
-        <Knob
-          name="Tools"
-          value={toolsOn.length ? toolsOn.map((t) => t.toolName).join(', ') : 'none allowed'}
-          where="Settings · Tools"
-          lands={`PUT /agents/{id} · tool_policy ${policy}`}
-          onEdit={() => jumpTo('agent-tools')}
-        />
-        <Knob
-          name="Skill"
-          value={config.skillId?.trim() || 'none installed'}
-          where="Settings · Skill ID"
-          lands="PUT /agents/{id}/skills/{skill_id} · unpinned, follows the latest ready version"
-          onEdit={() => jumpTo('skill-id')}
-        />
-
-        <p className="cfg-note">
-          Applies to the <b>next new chat</b>. The current conversation keeps the config its session was created with, and a
-          config PUT bumps <code>config_version</code> on every call, so the kit writes only what actually drifted.
-        </p>
-      </section>
-
-      <section className="cfg-section">
-        <h3 className="cfg-title">This conversation</h3>
-        <p className="cfg-caption muted">Live ids for the open chat. Click to copy — there is no public console to link to.</p>
+      <AgentPanel />
+      <Section
+        title="This conversation"
+        sdk="createSession() · streamEvents()"
+        caption="Live ids for the open chat, pinned when its first turn ran. Click to copy — there is no public console to link to."
+      >
         <IdRow
           label="Agent"
-          value={id.agentId}
           // A session with no agent id means the marker frame predates carrying one; no
           // session at all means the conversation simply has not started.
+          value={id.agentId}
           empty={id.sessionId ? "not recorded in this conversation's frames" : 'not created yet — send a message'}
         />
         <IdRow label="Session" value={id.sessionId} empty="not created yet — send a message" />
@@ -110,10 +83,101 @@ function ConfigTab({ prompts }: { prompts: PromptContent[] }) {
             <b>{id.frames}</b> {id.frames === 1 ? 'frame' : 'frames'}
           </span>
         </div>
-      </section>
+      </Section>
+    </div>
+  )
+}
 
-      <section className="cfg-section">
-        <h3 className="cfg-title">Not configurable from the kit</h3>
+// ── Config tab ─────────────────────────────────────────────────────────────
+
+/**
+ * The agent config editor, plus where each field lands upstream.
+ *
+ * The editor is DISABLED unless the effective agent is one the kit created. That is not
+ * decoration: for a borrowed agent (bound or ZOOCLAW_AGENT_ID) the Worker deliberately skips
+ * every config PUT (worker/provision.ts), so an editable-looking form would be a form whose
+ * changes silently do nothing — and if it did work, it would rewrite somebody else's agent.
+ */
+function ConfigTab({ hasConversation }: { hasConversation: boolean }) {
+  const [config, setConfig] = useAtom(configAtom)
+  const eff = useEffectiveAgent()
+  // Default to editable while the answer is still loading: the fields render disabled for a
+  // beat otherwise, which reads as "broken" rather than "loading".
+  const editable = eff.data?.editable ?? true
+  const policy = JSON.stringify(buildToolPolicy(config.tools))
+  const toolsOn = TOOLS.filter((t) => config.tools[t.key] ?? t.defaultOn)
+
+  return (
+    <div className="cfg">
+      <SettingsPanel
+        config={config}
+        onChange={setConfig}
+        appliesToNewChat={hasConversation}
+        disabledReason={
+          editable
+            ? null
+            : eff.data?.source === 'binding'
+              ? 'You are using an agent of your own, so its configuration belongs to it — the kit reads this agent and never writes it. Reset the binding in the Agent tab to edit the kit’s own agent instead.'
+              : 'This deployment pins one pre-built agent (ZOOCLAW_AGENT_ID). Its configuration belongs to whoever built it, and the kit never writes it.'
+        }
+      />
+
+      <Section
+        title="Where these land"
+        sdk="updateAgent() · putAgentSkill()"
+        caption={
+          editable
+            ? 'Applied to your agent on the first turn of a session — drift-gated, so an unchanged config produces no call at all.'
+            : 'Shown for reference. None of these are written while a borrowed agent is in use.'
+        }
+      >
+        <Knob
+          name="System prompt"
+          value={config.systemPrompt.trim() || '(empty)'}
+          where="Config · System prompt"
+          lands="PUT /agents/{id} · persona.docs[AGENTS.md]"
+          onEdit={editable ? () => jumpTo('sys-prompt') : undefined}
+        />
+        <Knob
+          name="Tools"
+          value={toolsOn.length ? toolsOn.map((t) => t.toolName).join(', ') : 'none allowed'}
+          where="Config · Tools"
+          lands={`PUT /agents/{id} · tool_policy ${policy}`}
+          onEdit={editable ? () => jumpTo('agent-tools') : undefined}
+        />
+        <Knob
+          name="Skill"
+          value={config.skillId?.trim() || 'none installed'}
+          where="Config · Skill ID"
+          lands="PUT /agents/{id}/skills/{skill_id} · unpinned, follows the latest ready version"
+          onEdit={editable ? () => jumpTo('skill-id') : undefined}
+        />
+        <p className="cfg-note">
+          Applies to the <b>next new chat</b>. The current conversation keeps the config its session was created with, and a config PUT
+          bumps <code>config_version</code> on every call, so the kit writes only what actually drifted.
+        </p>
+      </Section>
+    </div>
+  )
+}
+
+// ── Runtime tab ────────────────────────────────────────────────────────────
+
+function RuntimeTab() {
+  const runtime = useConfig()
+  return (
+    <div className="cfg">
+      <Section
+        title="Runtime"
+        sdk="createZooclawClient()"
+        caption="How this deployment is wired. Read-only — it comes from the Worker's environment, so changing it means a redeploy."
+      >
+        {runtime.isPending && <div className="muted">Loading…</div>}
+        {runtime.isError && <div className="cfg-empty">GET /api/app/config failed — the Worker may not be running.</div>}
+        {runtime.data && <RuntimeRows config={runtime.data} />}
+      </Section>
+
+      <Section title="Not configurable from the kit">
         <ul className="cfg-limits">
           <li>
             <b>Environment pin</b> — locked once the first sandbox exists; later changes return 409 <code>environment_locked</code>, and
@@ -133,7 +197,7 @@ function ConfigTab({ prompts }: { prompts: PromptContent[] }) {
             <b>Session PATCH</b> — the gateway does not proxy PATCH, so a session cannot be edited in place (405).
           </li>
         </ul>
-      </section>
+      </Section>
     </div>
   )
 }
@@ -157,6 +221,12 @@ function RuntimeRows({ config }: { config: RuntimeConfig }) {
             ? 'nothing is provisioned — no create, no credentials, no config PUT'
             : 'POST /agents → start → config PUT, cached per email'
         }
+      />
+      <Knob
+        name="Agent picker"
+        value={r.agentPicker ? 'on — a user may bind an agent of their own' : 'off — everyone uses the deployment’s agent'}
+        where="AGENT_PICKER (on by default; set `off` to close it)"
+        lands="GET /agents + the binding routes; off → 403 and stored bindings are ignored"
       />
       <Knob
         name="API base URL"
@@ -204,90 +274,9 @@ function RuntimeRows({ config }: { config: RuntimeConfig }) {
   )
 }
 
-/** One knob: what it is, its current effective value, where it is set, where it lands. */
-function Knob({
-  name,
-  value,
-  where,
-  lands,
-  mono,
-  onEdit,
-}: {
-  name: string
-  value: string
-  where: string
-  lands: string
-  mono?: boolean
-  /** Present → render a jump button instead of duplicating the editor here. */
-  onEdit?: () => void
-}) {
-  return (
-    <div className="cfg-row">
-      <div className="cfg-row-head">
-        <span className="cfg-name">{name}</span>
-        <span className={`cfg-value${mono ? ' mono' : ''}`}>{value}</span>
-        {onEdit && (
-          <button className="ghost cfg-edit" onClick={onEdit}>
-            Edit
-          </button>
-        )}
-      </div>
-      <div className="cfg-meta muted">
-        <span>set in {where}</span>
-        <span className="cfg-lands mono">{lands}</span>
-      </div>
-    </div>
-  )
-}
-
-/** A copyable id (monospace). Falls back to a plain, still-selectable value when the
- *  clipboard is unavailable (a non-secure origin blocks navigator.clipboard). */
-function IdRow({ label, value, empty }: { label: string; value: string | null; empty: string }) {
-  const [copied, setCopied] = useState(false)
-  return (
-    <div className="cfg-id">
-      <span className="cfg-name">{label}</span>
-      {value ? (
-        <button
-          className="cfg-copy mono"
-          title="Copy"
-          onClick={() => {
-            navigator.clipboard?.writeText(value).then(
-              () => {
-                setCopied(true)
-                setTimeout(() => setCopied(false), 1200)
-              },
-              () => {
-                /* clipboard blocked — the id stays on screen and selectable */
-              },
-            )
-          }}
-        >
-          {value}
-          <span className="cfg-copy-hint">{copied ? 'copied' : 'copy'}</span>
-        </button>
-      ) : (
-        <span className="cfg-value cfg-empty">{empty}</span>
-      )}
-    </div>
-  )
-}
-
-/** Scroll the settings pane's field into view and focus it — the Config tab names the
- *  knobs, the settings pane stays the single place they are edited. */
-function jumpTo(id: string): void {
-  const el = document.getElementById(id)
-  if (!el) return
-  // scrollIntoView ignores the OS motion preference on its own; the rest of the kit honours
-  // it (see the reduced-motion block in styles.css), so opt out of the animation explicitly.
-  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  el.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'center' })
-  if (el instanceof HTMLTextAreaElement || el instanceof HTMLInputElement) el.focus({ preventScroll: true })
-}
-
 /**
  * This conversation's Zooclaw identity, read from the `__zooclaw_session` marker frame the
- * turn runner emits once per session (worker/task-do.ts) — the same source the Frames tab
+ * turn runner emits once per session (worker/task-do.ts) — the same source the Debug tab
  * shows inline. Conversations started before the marker carried `agent_id` report a session
  * with no agent.
  */
@@ -313,7 +302,7 @@ export function conversationIdentity(prompts: PromptContent[]): {
   return { agentId, sessionId, turns: prompts.length, frames }
 }
 
-// ── Frames tab (the original raw inspector, unchanged) ─────────────────────
+// ── Debug tab (the raw frame inspector) ────────────────────────────────────
 
 function FramesTab({ prompts }: { prompts: PromptContent[] }) {
   if (!prompts.length) {

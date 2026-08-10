@@ -20,6 +20,11 @@ export interface Task {
   status: string
   /** The Zooclaw session backing this conversation (null until the first turn creates it). */
   session_id: string | null
+  /** The Zooclaw agent this conversation is PINNED to, written when its first turn resolves
+   *  one (null for conversations that predate the column). Sessions are agent-scoped, so
+   *  rebinding must not move an existing conversation to a different agent — its session id
+   *  would not exist there. See migrations/0002. */
+  agent_id: string | null
   user_email: string | null
   created_at: string
 }
@@ -39,6 +44,16 @@ export interface TaskSummary {
 export interface ZooclawAgentRow {
   agentId: string
   configHash: string | null
+}
+
+/** A user's manually BOUND agent (agent_bindings row) — one they already own in the ZooClaw
+ *  app, borrowed by this deployment. Distinct from ZooclawAgentRow on purpose: this agent
+ *  belongs to its author, so the kit only ever reads it. Nothing here is drift-gated
+ *  because nothing here is ever written upstream (worker/provision.ts). */
+export interface AgentBindingRow {
+  agentId: string
+  /** Display name captured when the binding was saved (may be stale, may be null). */
+  agentName: string | null
 }
 export interface Prompt {
   id: string
@@ -69,6 +84,16 @@ export interface Store {
   listTasksByUser(userEmail: string): Promise<TaskSummary[]>
   setTaskStatus(id: string, status: string): Promise<void>
   setTaskSessionId(id: string, sessionId: string): Promise<void>
+  /** Pin this conversation to the agent its first turn resolved. Write-once in practice —
+   *  every later turn reads the pin instead of re-resolving. */
+  setTaskAgentId(id: string, agentId: string): Promise<void>
+
+  /** The user's manually bound agent, if they picked one (see AgentBindingRow). */
+  getAgentBinding(userEmail: string): Promise<AgentBindingRow | undefined>
+  /** Upsert the binding (last write wins — unlike saveZooclawAgent, rebinding is the point). */
+  saveAgentBinding(userEmail: string, agentId: string, agentName: string | null): Promise<void>
+  /** Drop the binding → the next new conversation falls back to env-fixed or per-user. */
+  deleteAgentBinding(userEmail: string): Promise<void>
 
   getZooclawAgent(userEmail: string): Promise<ZooclawAgentRow | undefined>
   /** Idempotent (INSERT OR IGNORE): first writer per email wins, losers no-op. */

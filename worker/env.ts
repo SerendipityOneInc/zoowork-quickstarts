@@ -59,6 +59,24 @@ export interface Env {
    */
   ZOOCLAW_AGENT_ID?: string
 
+  /**
+   * AGENT PICKER, **on by default**. Lets a signed-in user bind this deployment to an agent
+   * they already own in the ZooClaw app (the panel's Agent tab), overriding ZOOCLAW_AGENT_ID
+   * and per-user provisioning for their NEW conversations.
+   *
+   * On by default because this kit is a TEMPLATE for learning the SDK: pointing it at an
+   * agent you already built is the fastest way to see `listAgents()` / `getAgent()` /
+   * `startAgent()` do something real, and making that a hidden opt-in would bury the lesson.
+   *
+   * Set `AGENT_PICKER=off` when a vertical ships this to end users. ZOOCLAW_API_KEY is an
+   * ORG token, so with the picker on ANY signed-in user can list and borrow ANY agent in the
+   * organization — fine while you are the only user, not something to hand a customer. Off
+   * is enforced on both sides: the routes 403 and provisioning ignores bindings already
+   * stored (worker/provision.ts resolveAgent), so turning it off revokes rather than
+   * grandfathers.
+   */
+  AGENT_PICKER?: string
+
   /** Optional shared embed gate key. When set, every /api/app/* call must present it
    *  (X-Embed-Key header or ?k= query) or gets 401. Unset → gate disabled. */
   EMBED_KEY?: string
@@ -77,6 +95,13 @@ export interface Env {
  *  and blocks `credentials/*` (404), so provisioning must not write them (provision.ts). */
 export function isGatewayMode(env: Env): boolean {
   return !!env.ZOOCLAW_API_KEY
+}
+
+/** May a signed-in user bind their own agent? On unless explicitly switched off — see
+ *  Env.AGENT_PICKER for why the template defaults open and when a vertical should close it. */
+export function agentPickerEnabled(env: Env): boolean {
+  const v = env.AGENT_PICKER?.trim().toLowerCase()
+  return !(v === 'off' || v === 'false' || v === '0')
 }
 
 /**
@@ -138,6 +163,10 @@ const KIT_ENV_VAR_DOCS: Record<ConfigurableEnvKey, Omit<EnvVarDoc, 'name'>> = {
     effect: 'Fixed-agent mode: everyone talks to this agent and the kit provisions nothing — no create, no config PUT.',
     secret: false,
   },
+  AGENT_PICKER: {
+    effect: 'On by default: users may bind an agent of their own (the Agent tab), overriding fixed/per-user for new chats. Set `off` before shipping to end users — the org key can reach every agent.',
+    secret: false,
+  },
   EMBED_KEY: {
     effect: 'Shared embed gate. Set, every /api/app/* call must present it (X-Embed-Key header or ?k=) or gets 401.',
     secret: true,
@@ -185,6 +214,9 @@ export function describeRuntime(env: Env): RuntimeConfig {
       // is the only reachable transport; without the key nothing can talk to the API at all.
       transport: isGatewayMode(env) ? 'gateway' : 'unconfigured',
       provisioning: env.ZOOCLAW_AGENT_ID ? 'fixed-agent' : 'per-user',
+      // A capability flag, not a value: it says whether the Agent tab's picker is live, and
+      // the routes enforce the same boolean. Safe to publish — it leaks no variable content.
+      agentPicker: agentPickerEnabled(env),
       identity: env.DEV_EMAIL ? 'dev-email' : env.CF_ACCESS_TEAM_DOMAIN && env.CF_ACCESS_AUD ? 'cloudflare-access' : 'unconfigured',
       embedGate: !!env.EMBED_KEY,
       attachments: ATTACHMENTS_ENABLED,
@@ -203,6 +235,7 @@ export function provisionConfig(env: Env): import('./provision.ts').ProvisionCon
     litellmKey: env.ZOOCLAW_LITELLM_KEY,
     userInternalToken: env.ZOOCLAW_USER_INTERNAL_TOKEN,
     gatewaySeedsCredentials: isGatewayMode(env),
+    agentPicker: agentPickerEnabled(env),
     ...(env.ZOOCLAW_ENVIRONMENT_ID ? { environmentId: env.ZOOCLAW_ENVIRONMENT_ID } : {}),
     ...(env.ZOOCLAW_AGENT_ID ? { fixedAgentId: env.ZOOCLAW_AGENT_ID } : {}),
   }

@@ -13,6 +13,8 @@ pnpm install
 pnpm dev                  # http://localhost:3000
 ```
 
+Needs **Node 22.20 or later** — the floor across this repo, set by the `skills` CLI.
+
 One value this time — no agent id. **This template builds its own agent** on first run
 and remembers it in `.agent`, so restarting does not litter your org. Point it at an agent
 you already own with `ZOOCLAW_AGENT_ID` if you prefer.
@@ -78,6 +80,17 @@ because you already have the catalog. What you add is what only you know.
 | [`skills/`](skills/) | your skills, one folder each |
 | [`zip.mjs`](zip.mjs) | uninteresting plumbing: `uploadSkill()` wants a zip |
 | [`skill.md`](skill.md) | the gotchas, written for a coding assistant |
+
+## Change it
+
+Teach your assistant the platform first — one command, and it works for Claude Code, Codex,
+Cursor and 70-odd others:
+
+```bash
+npx skills add SerendipityOneInc/zoowork-sdk-skills
+```
+
+Then open your assistant here and ask. `skill.md` covers what is specific to this template.
 
 ## Next
 

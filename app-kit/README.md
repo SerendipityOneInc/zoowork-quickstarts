@@ -77,7 +77,7 @@ Out of the box, the demo gives you:
 
 ## Quickstart
 
-Requires **Node >= 22** (wrangler 4); `.node-version` pins it. You need one thing: an
+Requires **Node >= 22.20** (wrangler 4); `.node-version` pins it. You need one thing: an
 org API key (`zct_...`).
 
 ```bash

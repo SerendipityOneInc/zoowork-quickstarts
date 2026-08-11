@@ -14,23 +14,28 @@ You need two values, both copied from the ZooClaw workspace UI:
 
 | Template | What it is | Needs |
 |---|---|---|
-| [`chat/`](chat/) | **Start here.** The smallest thing that talks to your agent: a chat box, one conversation, ~250 lines, no database and no build step. Two values and two commands. | Node 20 |
-| [`skill-lab/`](skill-lab/) | **Teach an agent something.** Builds its own agent, then lets you edit its persona and upload skills you wrote — and ask the same question before and after, to see what changed. Needs only the key. | Node 20 |
-| [`app-kit/`](app-kit/) | **Production reference.** Cloudflare Workers + D1 + Durable Objects + Access: per-user agents, multi-conversation, refresh-safe streaming, a `domain/` seam for verticals. Go here when `chat/` runs out of room. | Node 22, pnpm, wrangler |
+| [`chat/`](chat/) | **Start here.** The smallest thing that talks to your agent: a chat box, one conversation, ~250 lines, no database and no build step. Two values and two commands. | Node 22.20 |
+| [`skill-lab/`](skill-lab/) | **Teach an agent something.** Builds its own agent, then lets you edit its persona and upload skills you wrote — and ask the same question before and after, to see what changed. Needs only the key. | Node 22.20 |
+| [`app-kit/`](app-kit/) | **Production reference.** Cloudflare Workers + D1 + Durable Objects + Access: per-user agents, multi-conversation, refresh-safe streaming, a `domain/` seam for verticals. Go here when `chat/` runs out of room. | Node 22.20, pnpm, wrangler |
 
-## Your coding assistant already knows this platform
+## Teach your coding assistant this platform
 
-This repo vendors the ZooClaw platform skill at
-[`.agents/skills/zooclaw-managed-agents/`](.agents/skills/zooclaw-managed-agents/). Clone
-the repo, open your assistant in it, and it knows the API shape before it writes a line:
-which calls exist, which do not, and the handful of places where code that looks right
-fails at runtime.
-
-Nothing to install. If you want the same skill in projects outside this repo:
+One command, before you start:
 
 ```bash
-/plugin marketplace add SerendipityOneInc/zoowork-sdk-skills
+npx skills add SerendipityOneInc/zoowork-sdk-skills
 ```
+
+Your assistant then knows the API shape before it writes a line: which calls exist, which do
+not, and the handful of places where code that looks right fails at runtime.
+
+This installs into whichever assistants you have — Claude Code, Codex, Cursor and 70-odd
+others — each in the directory it actually reads. Add `-g` to install for every project
+instead of this one. Using Claude Code only? `/plugin marketplace add
+SerendipityOneInc/zoowork-sdk-skills` does the same thing.
+
+Install it wherever you are building, not just here: the skill is about the platform, and
+that is most useful in *your* project.
 
 ## Adding a template
 

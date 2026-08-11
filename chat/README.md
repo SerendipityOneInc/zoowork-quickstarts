@@ -13,6 +13,8 @@ pnpm install
 pnpm dev                  # http://localhost:3000
 ```
 
+Needs **Node 22.20 or later** — the floor across this repo, set by the `skills` CLI.
+
 Both values are copied from the ZooClaw workspace UI: the API key from your org admin,
 the agent id (`agt_…`) from your agent's detail dialog.
 
@@ -59,6 +61,12 @@ read-only variant. Keep it in the server.
 
 ## Change it
 
-Your assistant already knows this platform — the repo vendors the ZooClaw skill at
-[`../.agents/skills/`](../.agents/skills/). Open your assistant in this directory and ask
-for what you want. `skill.md` here covers what is specific to this template.
+Teach your assistant the platform first — one command, and it works for Claude Code, Codex,
+Cursor and 70-odd others:
+
+```bash
+npx skills add SerendipityOneInc/zoowork-sdk-skills
+```
+
+Then open your assistant in this directory and ask for what you want. `skill.md` here covers
+what is specific to this template.

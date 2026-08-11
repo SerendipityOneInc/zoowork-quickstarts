@@ -241,7 +241,7 @@ const server = createServer(async (req, res) => {
     return json(res, 404, { error: 'not found' })
   } catch (e) {
     console.error(e)
-    if (!res.headersSent) json(res, 500, { error: describe(e) })
+    if (!res.headersSent) json(res, 500, { error: 'internal server error' })
     else res.end()
   }
 })

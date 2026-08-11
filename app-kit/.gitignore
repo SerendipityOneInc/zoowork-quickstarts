@@ -1,0 +1,20 @@
+node_modules/
+build/
+dist/
+.wrangler/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log
+
+# Never commit local credentials or agent tool state
+.env
+.env.*
+!.env.example
+.dev.vars
+!.dev.vars.example
+.claude/

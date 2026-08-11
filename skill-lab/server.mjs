@@ -82,7 +82,16 @@ async function ensureRunning(agentId) {
   return agentId
 }
 
-const AGENT_ID = await resolveAgent()
+// Resolving the agent is the first thing that touches the network, so it is where a bad key
+// or an unreachable gateway shows up. Catch it here: an unhandled rejection at module top
+// level prints a stack trace from inside the SDK, which tells you nothing about your .env.
+let AGENT_ID
+try {
+  AGENT_ID = await resolveAgent()
+} catch (e) {
+  console.error(`\nCould not reach ZooClaw.\n\n  ${describe(e)}\n`)
+  process.exit(1)
+}
 
 // ─── state the page renders ──────────────────────────────────────────────────
 
@@ -250,8 +259,10 @@ const server = createServer(async (req, res) => {
 
 function describe(e) {
   if (e instanceof ZooclawError) {
-    if (e.status === 401) return 'ZooClaw rejected the API key (401). Check ZOOCLAW_API_KEY in .env.'
-    if (e.status === 404) return 'Not found (404). Installing a BUILT-IN skill returns this — those cannot be added or removed.'
+    if (e.status === 401) return 'ZooClaw rejected the API key (401). Check ZOOCLAW_API_KEY in .env — a stray space or a truncated paste looks exactly like this.'
+    if (e.status === 404) {
+      return 'Not found (404). Installing a BUILT-IN skill returns this — those cannot be added or removed. If you set ZOOCLAW_AGENT_ID, a 404 there means that agent belongs to a different organization than your key.'
+    }
     return `ZooClaw error ${e.status}${e.type ? ` ${e.type}` : ''}: ${e.message}`
   }
   return e?.message ?? String(e)

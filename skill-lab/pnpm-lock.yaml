@@ -1,0 +1,23 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies:
+      '@zooclaw-agents/sdk':
+        specifier: ^0.0.5
+        version: 0.0.5
+
+packages:
+
+  '@zooclaw-agents/sdk@0.0.5':
+    resolution: {integrity: sha512-nUYvqcUJoDJ3uh7MBivDCeX36s1noGU3IONK0sZuDF2nDbwezGghLmdeTmiC8WeJbkALIPllho6LcND2ORQrSQ==}
+    engines: {node: '>=20'}
+
+snapshots:
+
+  '@zooclaw-agents/sdk@0.0.5': {}

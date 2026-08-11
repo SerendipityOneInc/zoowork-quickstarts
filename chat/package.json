@@ -4,7 +4,7 @@
   "type": "module",
   "description": "The smallest thing that talks to your ZooClaw agent: an API key, an agent id, a chat box.",
   "engines": {
-    "node": ">=20"
+    "node": ">=22.20.0"
   },
   "scripts": {
     "dev": "node server.mjs"

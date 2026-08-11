@@ -3,7 +3,13 @@
   "private": true,
   "type": "module",
   "description": "Build an agent, give it a persona, upload a skill, and watch the same question get a different answer.",
-  "engines": { "node": ">=20" },
-  "scripts": { "dev": "node server.mjs" },
-  "dependencies": { "@zooclaw-agents/sdk": "^0.0.5" }
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "scripts": {
+    "dev": "node server.mjs"
+  },
+  "dependencies": {
+    "@zooclaw-agents/sdk": "^0.0.5"
+  }
 }

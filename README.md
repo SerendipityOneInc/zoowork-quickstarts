@@ -15,6 +15,7 @@ You need two values, both copied from the ZooClaw workspace UI:
 | Template | What it is | Needs |
 |---|---|---|
 | [`chat/`](chat/) | **Start here.** The smallest thing that talks to your agent: a chat box, one conversation, ~250 lines, no database and no build step. Two values and two commands. | Node 20 |
+| [`skill-lab/`](skill-lab/) | **Teach an agent something.** Builds its own agent, then lets you edit its persona and upload skills you wrote — and ask the same question before and after, to see what changed. Needs only the key. | Node 20 |
 | [`app-kit/`](app-kit/) | **Production reference.** Cloudflare Workers + D1 + Durable Objects + Access: per-user agents, multi-conversation, refresh-safe streaming, a `domain/` seam for verticals. Go here when `chat/` runs out of room. | Node 22, pnpm, wrangler |
 
 ## Your coding assistant already knows this platform

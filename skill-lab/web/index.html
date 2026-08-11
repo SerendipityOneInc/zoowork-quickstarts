@@ -1,0 +1,236 @@
+<!doctype html>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ZooClaw skill lab</title>
+
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fff; --fg: #16181d; --muted: #6b7280; --line: #e5e7eb;
+    --panel: #fafafa; --field: #fff; --accent: #4f46e5; --ok: #059669;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --fg: #e8eaed; --muted: #9aa1ac; --line: #262a33;
+            --panel: #14171d; --field: #171a21; --accent: #818cf8; --ok: #34d399; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.6 ui-sans-serif, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: grid; grid-template-columns: 340px 1fr; height: 100dvh; overflow: hidden;
+  }
+  @media (max-width: 860px) { body { grid-template-columns: 1fr; height: auto; overflow: visible; } }
+
+  aside { border-right: 1px solid var(--line); overflow-y: auto; padding: 20px; background: var(--panel); }
+  /* min-height:0 lets #asks scroll inside main instead of pushing the page out of view. */
+  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin: 26px 0 10px; }
+  h2:first-child { margin-top: 0; }
+  .agent { font-size: 12px; color: var(--muted); word-break: break-all; line-height: 1.5; }
+  .agent b { color: var(--fg); font-size: 14px; display: block; word-break: normal; }
+
+  textarea, input {
+    width: 100%; padding: 9px 11px; border-radius: 9px; border: 1px solid var(--line);
+    background: var(--field); color: inherit; font: inherit; resize: vertical;
+  }
+  button {
+    padding: 7px 14px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--field); color: inherit; font: inherit; font-size: 14px; cursor: pointer;
+  }
+  button.primary { background: var(--fg); color: var(--bg); border-color: var(--fg); font-weight: 600; }
+  button:disabled { opacity: .45; cursor: default; }
+
+  .card { border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; background: var(--bg); }
+  .card .name { font-weight: 600; font-size: 14px; }
+  .card .desc { font-size: 12.5px; color: var(--muted); margin: 5px 0 10px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .pill {
+    display: inline-block; font-size: 11.5px; padding: 2px 8px; border-radius: 99px;
+    border: 1px solid var(--line); color: var(--muted); margin: 0 4px 4px 0;
+  }
+  .on { color: var(--ok); border-color: var(--ok); }
+
+  #asks { flex: 1; overflow-y: auto; padding: 24px; }
+  .inner { max-width: 780px; margin: 0 auto; }
+  .ask { border: 1px solid var(--line); border-radius: 12px; margin-bottom: 18px; overflow: hidden; }
+  .ask .q { padding: 12px 16px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  .ask .meta { padding: 8px 16px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); }
+  .ask .a { padding: 14px 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .status { color: var(--muted); font-style: italic; }
+  .error { color: #dc2626; }
+  .hint { color: var(--muted); font-size: 13px; }
+  form.askbar { border-top: 1px solid var(--line); padding: 14px 24px; display: flex; gap: 10px; }
+  form.askbar .inner { display: flex; gap: 10px; width: 100%; }
+</style>
+
+<aside>
+  <h2>Lab agent</h2>
+  <div class="agent" id="agent">…</div>
+
+  <h2>Persona</h2>
+  <textarea id="persona" rows="5"></textarea>
+  <div class="row" style="margin-top:8px">
+    <button class="primary" id="save-persona">Apply</button>
+    <span class="hint" id="persona-note"></span>
+  </div>
+
+  <h2>Your skills</h2>
+  <div id="available"></div>
+
+  <h2>Built in</h2>
+  <div class="hint" style="margin-bottom:8px">
+    Attached when the agent was created. You cannot add or remove these.
+  </div>
+  <div id="builtin"></div>
+</aside>
+
+<main>
+  <div id="asks"><div class="inner" id="inner">
+    <p class="hint">
+      Ask something the agent cannot know — the office coffee prices, say. Then install the
+      <b>coffee-order</b> skill on the left and ask the exact same thing again.
+      Each question opens a fresh session, so the second answer comes from the skill, not from memory.
+    </p>
+  </div></div>
+
+  <form class="askbar" id="form"><div class="inner">
+    <input id="q" placeholder="咖啡多少钱？菜单上有什么？" autofocus />
+    <button class="primary" id="send">Ask</button>
+    <button type="button" id="again" disabled title="Ask the same question again">Ask again</button>
+  </div></form>
+</main>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id)
+  let current = null
+  let lastQuestion = ''
+
+  const render = (s) => {
+    current = s
+    $('agent').innerHTML = `<b></b><span></span>`
+    $('agent').querySelector('b').textContent = s.agent.name
+    $('agent').querySelector('span').textContent = `${s.agent.id} · ${s.agent.model} · config v${s.agent.configVersion ?? '?'}`
+    if (document.activeElement !== $('persona')) $('persona').value = s.agent.persona
+
+    const installed = new Map(s.installed.map((i) => [i.name, i.id]))
+    $('available').innerHTML = ''
+    for (const skill of s.available) {
+      const on = installed.get(skill.name)
+      const card = document.createElement('div')
+      card.className = 'card'
+      const name = document.createElement('div')
+      name.className = 'name'
+      name.textContent = skill.name + (on ? ' ✓' : '')
+      const desc = document.createElement('div')
+      desc.className = 'desc'
+      // The description is what the agent reads when deciding whether the skill applies.
+      desc.textContent = skill.description || '(no description — the agent will never load it)'
+      const row = document.createElement('div')
+      row.className = 'row'
+      const btn = document.createElement('button')
+      btn.textContent = on ? 'Uninstall' : 'Install'
+      if (on) btn.onclick = () => act('/api/uninstall', { skillId: on }, btn)
+      else btn.onclick = () => act('/api/install', { dir: skill.dir }, btn)
+      row.append(btn)
+      if (on) { const p = document.createElement('span'); p.className = 'pill on'; p.textContent = 'installed'; row.append(p) }
+      card.append(name, desc, row)
+      $('available').append(card)
+    }
+    if (!s.available.length) $('available').innerHTML = '<div class="hint">Put a SKILL.md in <code>skills/&lt;name&gt;/</code>.</div>'
+
+    $('builtin').innerHTML = ''
+    for (const n of s.builtin) {
+      const p = document.createElement('span'); p.className = 'pill'; p.textContent = n; $('builtin').append(p)
+    }
+  }
+
+  const act = async (path, body, btn) => {
+    const label = btn.textContent
+    btn.disabled = true; btn.textContent = '…'
+    try {
+      const r = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const data = await r.json()
+      if (data.error) throw new Error(data.error)
+      render(data.state ?? data)
+    } catch (e) {
+      btn.textContent = label; btn.disabled = false
+      alert(e.message)
+    }
+  }
+
+  $('save-persona').onclick = async () => {
+    const btn = $('save-persona')
+    btn.disabled = true
+    try {
+      const r = await fetch('/api/persona', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ content: $('persona').value }),
+      })
+      render(await r.json())
+      $('persona-note').textContent = 'applied'
+      setTimeout(() => ($('persona-note').textContent = ''), 2000)
+    } finally { btn.disabled = false }
+  }
+
+  // Scroll the pane, not the document — the layout is a fixed-height grid.
+  const scrollDown = () => $('asks').scrollTo({ top: 1e9, behavior: 'smooth' })
+
+  const runAsk = async (question) => {
+    lastQuestion = question
+    $('inner').querySelector('.hint')?.remove()
+    $('again').disabled = true
+
+    const box = document.createElement('div')
+    box.className = 'ask'
+    const q = document.createElement('div'); q.className = 'q'; q.textContent = question
+    const meta = document.createElement('div'); meta.className = 'meta'
+    const yours = current?.installed.map((i) => i.name) ?? []
+    meta.textContent = yours.length ? `with your skills: ${yours.join(', ')}` : 'with no skills of your own installed'
+    const a = document.createElement('div'); a.className = 'a status'; a.textContent = 'thinking…'
+    box.append(q, meta, a)
+    $('inner').append(box)
+    scrollDown()
+
+    let started = false
+    try {
+      const res = await fetch('/api/ask', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question }),
+      })
+      const reader = res.body.pipeThrough(new TextDecoderStream()).getReader()
+      let buffer = ''
+      for (;;) {
+        const { value, done } = await reader.read()
+        if (done) break
+        buffer += value
+        const parts = buffer.split('\n\n'); buffer = parts.pop() ?? ''
+        for (const part of parts) {
+          const line = part.split('\n').find((l) => l.startsWith('data: '))
+          if (!line) continue
+          const f = JSON.parse(line.slice(6))
+          if (f.type === 'status' && !started) a.textContent = `${f.label}…`
+          else if (f.type === 'text') {
+            if (!started) { started = true; a.className = 'a'; a.textContent = '' }
+            a.textContent += f.text
+          } else if (f.type === 'error') { a.className = 'a error'; a.textContent = f.message }
+          else if (f.type === 'done' && !started) { a.className = 'a error'; a.textContent = `run ${f.outcome}` }
+        }
+      }
+    } catch (e) {
+      a.className = 'a error'; a.textContent = String(e)
+    } finally {
+      $('again').disabled = false
+      scrollDown()
+    }
+  }
+
+  $('form').onsubmit = (e) => {
+    e.preventDefault()
+    const question = $('q').value.trim() || $('q').placeholder
+    runAsk(question)
+  }
+  $('again').onclick = () => lastQuestion && runAsk(lastQuestion)
+
+  render(await (await fetch('/api/state')).json())
+</script>

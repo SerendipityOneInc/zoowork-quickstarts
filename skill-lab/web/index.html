@@ -133,7 +133,17 @@
       if (on) btn.onclick = () => act('/api/uninstall', { skillId: on }, btn)
       else btn.onclick = () => act('/api/install', { dir: skill.dir }, btn)
       row.append(btn)
-      if (on) { const p = document.createElement('span'); p.className = 'pill on'; p.textContent = 'installed'; row.append(p) }
+      if (on) {
+        // Editing SKILL.md on disk changes nothing on the platform until it is uploaded
+        // again — and nothing on this page would tell you. This button publishes a new
+        // version; installed agents follow it without reinstalling.
+        const again = document.createElement('button')
+        again.textContent = 'Re-upload'
+        again.title = 'You edited SKILL.md — publish a new version'
+        again.onclick = () => act('/api/install', { dir: skill.dir }, again)
+        row.append(again)
+        const p = document.createElement('span'); p.className = 'pill on'; p.textContent = 'installed'; row.append(p)
+      }
       card.append(name, desc, row)
       $('available').append(card)
     }

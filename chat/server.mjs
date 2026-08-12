@@ -239,6 +239,11 @@ function describe(e) {
     if (e.type === 'agent_not_running') return 'The agent is not running (409). Restart this server — it starts the agent on boot.'
     return `ZooClaw error ${e.status}${e.type ? ` ${e.type}` : ''}: ${e.message}`
   }
+  // A transport failure arrives as the two words 'fetch failed'; the real reason is on .cause.
+  if (e?.name === 'TypeError' && /fetch failed/i.test(e.message ?? '')) {
+    const why = e.cause?.message ?? e.cause?.code ?? 'no route to the gateway'
+    return `Could not reach the ZooClaw gateway (${why}). Check your network, VPN or proxy, and ZOOCLAW_BASE_URL if you set one.`
+  }
   return e?.message ?? String(e)
 }
 
@@ -265,7 +270,7 @@ async function loadDotEnv(path) {
   } catch {
     return // no .env — the config check below produces the real message
   }
-  for (const line of raw.split('\n')) {
+  for (const line of raw.split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/i)
     if (!m) continue
     const value = m[2].trim().replace(/^(['"])(.*)\1$/, '$2')
@@ -277,7 +282,15 @@ async function loadDotEnv(path) {
 
 try {
   const name = await ensureRunning(AGENT_ID)
-  server.listen(PORT, () => {
+  server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`\nPort ${PORT} is already in use.\n\n  PORT=3001 npm run dev\n`)
+    process.exit(1)
+  }
+  throw e
+})
+
+server.listen(PORT, () => {
     console.log(`\n  talking to "${name}"\n  http://localhost:${PORT}\n`)
   })
 } catch (e) {

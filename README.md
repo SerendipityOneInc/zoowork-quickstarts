@@ -3,19 +3,24 @@
 Runnable templates for building on **ZooClaw Managed Agents**. Each directory is a
 self-contained app: clone the repo, work in one directory, run it.
 
+```bash
+git clone https://github.com/SerendipityOneInc/zoowork-quickstarts
+cd zoowork-quickstarts
+```
+
 You need two values, both copied from the ZooClaw workspace UI:
 
 | | |
 |---|---|
 | `ZOOCLAW_API_KEY` | `zct_…` — issued by your org admin. **Server-side only:** it authenticates your whole organization, not one end user. |
-| `ZOOCLAW_AGENT_ID` | `agt_…` — copy it from your agent's detail dialog in the workspace UI. |
+| `ZOOCLAW_AGENT_ID` | `agt_…` — open your agent in the workspace UI, and copy it from the detail dialog. |
 
 ## Templates
 
 | Template | What it is | Needs |
 |---|---|---|
-| [`chat/`](chat/) | **Start here.** The smallest thing that talks to your agent: a chat box, one conversation, ~250 lines, no database and no build step. Two values and two commands. | Node 22.20 |
-| [`skill-lab/`](skill-lab/) | **Teach an agent something.** Builds its own agent, then lets you edit its persona and upload skills you wrote — and ask the same question before and after, to see what changed. Needs only the key. | Node 22.20 |
+| [`chat/`](chat/) | **Start here.** The smallest thing that talks to your agent: a chat box, one conversation, ~250 lines, no database and no build step. Two values and two commands. | Node 22.20, npm |
+| [`skill-lab/`](skill-lab/) | **Teach an agent something.** Builds its own agent, then lets you edit its persona and upload skills you wrote — and ask the same question before and after, to see what changed. Needs only the key. | Node 22.20, npm |
 | [`app-kit/`](app-kit/) | **Production reference.** Cloudflare Workers + D1 + Durable Objects + Access: per-user agents, multi-conversation, refresh-safe streaming, a `domain/` seam for verticals. Go here when `chat/` runs out of room. | Node 22.20, pnpm, wrangler |
 
 ## Teach your coding assistant this platform
@@ -56,7 +61,8 @@ Then add a row to the table above.
 
 - **SDK** — [`@zooclaw-agents/sdk`](https://www.npmjs.com/package/@zooclaw-agents/sdk)
   ([source](https://github.com/SerendipityOneInc/zoowork-sdk-typescript))
-- **API reference** — [zoowork-agents-docs](https://github.com/SerendipityOneInc/zoowork-agents-docs)
+- **API reference** — [zooclaw.ai/docs](https://zooclaw.ai/docs/)
+  ([source](https://github.com/SerendipityOneInc/zoowork-agents-docs))
 - **Skills** — [zoowork-sdk-skills](https://github.com/SerendipityOneInc/zoowork-sdk-skills)
 
 ## License

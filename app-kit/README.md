@@ -164,13 +164,10 @@ Skipped entirely in fixed-agent mode (see Quickstart). Otherwise the first turn 
 documented bring-up order, then caches the agent id by email in D1:
 
 1. `POST /v1/agents` with a **stable Idempotency-Key** (`zooclaw-app-kit:agent:<email>`)
-   so concurrent first-turns converge on one agent. Created with `warm: true` (pre-warmed
-   sandbox — the first message doesn't pay the cold start) and onboarding skipped (a chat
-   app wants the configured persona, not a BOOTSTRAP interview turn).
+   so concurrent first-turns converge on one agent. The SDK skips onboarding on every
+   create (a chat app wants the configured persona, not a BOOTSTRAP interview turn).
 2. The API seeds the agent's model credentials for you at create time - the kit writes none.
-   platform credentials `start` requires.
-3. `POST .../start` (self-heals a 409 `platform_credentials_required` by writing
-   credentials and starting again).
+3. `POST .../start`.
 
 Session config (persona + tool_policy + skill pin) is applied as a follow-up PUT, gated
 by a config fingerprint — the ZooClaw API PUTs bump `config_version` on EVERY call, so the kit
@@ -220,7 +217,6 @@ The wire contract carries **[verify]** markers — shapes the docs did not pin d
 Confirm each against your staging the ZooClaw API before shipping
 (details in the [API reference](https://zooclaw.ai/docs/)):
 
-- the create-time flag spelling for skipping onboarding (`onboarding: false`);
 - whether `user.message` content accepts richer blocks than a plain string;
 - the exact `user.tool_confirmation` payload fields (the kit's HITL answer path);
 - the tool_policy deny-key spelling (`domain/agent.ts buildToolPolicy`).

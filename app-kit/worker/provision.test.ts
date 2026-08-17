@@ -1,8 +1,8 @@
 /**
  * agentFor / ensureAgentConfig tests with a fake ZooclawClient + the in-memory store —
  * zero quota. Pins the provisioning orchestration the docs make order-sensitive: create
- * (stable Idempotency-Key) → platform credentials → start; cache reuse without touching
- * the ZooClaw API writes; the 404-stale self-heal; start's platform_credentials_required heal;
+ * (stable Idempotency-Key) → start (the gateway seeds platform credentials at create);
+ * cache reuse without touching the ZooClaw API writes; the 404-stale self-heal;
  * and the drift-gated config PUT (every API PUT bumps config_version, so an
  * unchanged config must produce ZERO PUTs).
  */
@@ -13,7 +13,7 @@ import { createMemStore } from '../server/store-mem.ts'
 import { ZooclawError, type ZooclawClient } from '@zooclaw-agents/sdk'
 import { AGENT_MODEL, type AgentConfig } from '../domain/agent.ts'
 
-const CFG: ProvisionConfig = { orgId: 'org_1', litellmKey: 'llm_key', userInternalToken: 'uit_key' }
+const CFG: ProvisionConfig = { orgId: 'org_1' }
 
 interface FakeOpts {
   /** getAgent's reported status.desired_state (default 'running'). */
@@ -28,21 +28,16 @@ interface FakeOpts {
   createErrors?: Error[]
   /** agent_ids returned by successive createAgent calls (default agt-new, agt-new2, …). */
   createIds?: string[]
-  /** listCredentials result (default [] — a fresh agent has none). */
-  existingCreds?: string[]
-  /** Consumed one per putCredential call (models a dead replayed agent 404ing). */
-  credErrors?: Error[]
 }
 
 /** Call-recording the ZooClaw API double. `calls` is the ordered op log the tests assert on —
- *  order IS the contract (credentials must exist before start; config after bring-up). */
+ *  order IS the contract (create before start; config after bring-up). */
 function fakeZooclawApi(opts: FakeOpts = {}) {
   const calls: string[] = []
   const bodies: Record<string, unknown> = {}
   const startErrors = [...(opts.startErrors ?? [])]
   const createErrors = [...(opts.createErrors ?? [])]
   const createIds = [...(opts.createIds ?? ['agt-new', 'agt-new2'])]
-  const credErrors = [...(opts.credErrors ?? [])]
   const idemKeys: (string | undefined)[] = []
   const client = {
     async createAgent(input: unknown, key?: string) {
@@ -63,15 +58,6 @@ function fakeZooclawApi(opts: FakeOpts = {}) {
       if (opts.updateAgentError) throw opts.updateAgentError
       bodies.sections = sections
       return { agent_id: agentId }
-    },
-    async listCredentials(_agentId: string) {
-      calls.push('list-creds')
-      return (opts.existingCreds ?? []).map((app) => ({ app, ref: `pgcred://x/${app}` }))
-    },
-    async putCredential(_agentId: string, app: string) {
-      calls.push(`cred:${app}`)
-      const e = credErrors.shift()
-      if (e) throw e
     },
     async startAgent() {
       calls.push('start')
@@ -183,23 +169,24 @@ test('fixed-agent mode still provisions and configures nothing', async () => {
   assert.deepEqual(calls, [])
 })
 
-test('fresh path: create (stable idempotency key) → both platform credentials → start → row saved', async () => {
+test('fresh path: create (stable idempotency key) → start → row saved', async () => {
   const store = createMemStore()
   const { client, calls, bodies, idemKey } = fakeZooclawApi()
 
   const { agentId } = await agentFor(store, client, 'u@x.com', CFG)
   assert.equal(agentId, 'agt-new')
-  // credentials RECONCILE (list, then PUT what's missing) — a bring-up retry must not
-  // blind-replay a credential that already landed (each PUT appends a secret version)
-  assert.deepEqual(calls, ['create', 'list-creds', 'cred:litellm', 'cred:user-internal-token', 'start'])
+  // The gateway seeds platform credentials at create — the kit only creates and starts.
+  assert.deepEqual(calls, ['create', 'start'])
   // deterministic per email — this is what converges concurrent first-turns to ONE agent
   assert.equal(idemKey(), 'zooclaw-app-kit:agent:u@x.com')
 
   const create = bodies.create as { resource: Record<string, unknown>; ownership: unknown }
   assert.equal(create.resource.name, 'app-kit: u@x.com')
   assert.deepEqual(create.resource.model, { primary: AGENT_MODEL })
-  assert.equal(create.resource.onboarding, false) // chat app: skip the BOOTSTRAP playbook
-  assert.equal(create.resource.warm, true)
+  // onboarding/warm are no longer part of the resource: the SDK forces
+  // onboarding: false at the wire and warm was removed (zooclaw-engine#791).
+  assert.equal('onboarding' in create.resource, false)
+  assert.equal('warm' in create.resource, false)
   assert.deepEqual(create.ownership, ownershipFor('u@x.com', 'org_1'))
   assert.deepEqual(ownershipFor('u@x.com', 'org_1'), { owner_uid: 'email:u@x.com', org_id: 'org_1' })
 
@@ -232,20 +219,9 @@ test('stale path: cached agent 404s on this the ZooClaw API → row deleted → 
 
   const { agentId } = await agentFor(store, client, 'u@x.com', CFG)
   assert.equal(agentId, 'agt-new')
-  assert.deepEqual(calls, ['get:agt-dead', 'create', 'list-creds', 'cred:litellm', 'cred:user-internal-token', 'start'])
+  assert.deepEqual(calls, ['get:agt-dead', 'create', 'start'])
   // delete-then-save: saveZooclawAgent is INSERT-OR-IGNORE, so the stale row had to go first
   assert.equal((await store.getZooclawAgent('u@x.com'))?.agentId, 'agt-new')
-})
-
-test('credential reconcile: an already-landed credential is not re-PUT on bring-up', async () => {
-  // Models the retry after a partial bring-up failure: litellm landed, the token PUT
-  // timed out. The retry must PUT only the missing app (contract: credential PUTs append
-  // secret versions + bump config_version — reconcile, don’t blind-replay).
-  const store = createMemStore()
-  const { client, calls } = fakeZooclawApi({ existingCreds: ['litellm'] })
-
-  await agentFor(store, client, 'u@x.com', CFG)
-  assert.deepEqual(calls, ['create', 'list-creds', 'cred:user-internal-token', 'start'])
 })
 
 test('idempotency_conflict on the stable create key → one retry with a fresh unique key', async () => {
@@ -265,24 +241,20 @@ test('idempotency_conflict on the stable create key → one retry with a fresh u
 })
 
 test('stable-key replay of a soft-deleted create (bring-up 404s) → recreate under a fresh key', async () => {
-  // The replay "succeeds" but returns the original — dead — agent_id; the credential
-  // write 404s. Without key rotation this is an unbreakable reprovision loop.
+  // The replay "succeeds" but returns the original — dead — agent_id; the start
+  // 404s. Without key rotation this is an unbreakable reprovision loop.
   const store = createMemStore()
   const { client, calls, idemKeys } = fakeZooclawApi({
     createIds: ['agt-dead-replay', 'agt-live'],
-    credErrors: [new ZooclawError(404, 'agent not found', 'not_found')],
+    startErrors: [new ZooclawError(404, 'agent not found', 'not_found')],
   })
 
   const { agentId } = await agentFor(store, client, 'u@x.com', CFG)
   assert.equal(agentId, 'agt-live')
   assert.deepEqual(calls, [
     'create', // stable key → replayed dead agent
-    'list-creds',
-    'cred:litellm', // 404s → dead replay detected
+    'start', // 404s → dead replay detected
     'create', // fresh unique key → genuinely new agent
-    'list-creds',
-    'cred:litellm',
-    'cred:user-internal-token',
     'start',
   ])
   assert.notEqual(idemKeys[1], idemKeys[0])
@@ -300,19 +272,7 @@ test('a transient (non-404) probe error rethrows and keeps the cached row', asyn
   assert.equal((await store.getZooclawAgent('u@x.com'))?.agentId, 'agt-keep')
 })
 
-test('credential heal: start 409 platform_credentials_required → write credentials → start again', async () => {
-  const store = createMemStore()
-  await store.saveZooclawAgent('u@x.com', 'agt-1', null)
-  const { client, calls } = fakeZooclawApi({
-    desiredState: 'stopped',
-    startErrors: [new ZooclawError(409, 'platform credentials missing', 'platform_credentials_required')],
-  })
-
-  await agentFor(store, client, 'u@x.com', CFG)
-  assert.deepEqual(calls, ['get:agt-1', 'start', 'cred:litellm', 'cred:user-internal-token', 'start'])
-})
-
-test('credential heal only covers its one documented 409 — other conflicts rethrow', async () => {
+test('a start conflict on the reuse path rethrows — no blind retry', async () => {
   const store = createMemStore()
   await store.saveZooclawAgent('u@x.com', 'agt-1', null)
   const { client, calls } = fakeZooclawApi({
@@ -321,7 +281,7 @@ test('credential heal only covers its one documented 409 — other conflicts ret
   })
 
   await assert.rejects(agentFor(store, client, 'u@x.com', CFG), /environment locked/)
-  assert.deepEqual(calls, ['get:agt-1', 'start']) // no blind credential rewrite
+  assert.deepEqual(calls, ['get:agt-1', 'start'])
 })
 
 test('config drift: PUT sections + record hash; unchanged config → ZERO PUTs; changed prompt → PUT again', async () => {

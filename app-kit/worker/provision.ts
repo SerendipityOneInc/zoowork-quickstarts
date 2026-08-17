@@ -1,15 +1,15 @@
 /**
  * Per-user Zooclaw Agent provisioning + config reconciliation (kit backbone). Lazily
  * provisions ONE Managed Agent per user (cached in zooclaw_agents by email), walks the
- * documented bring-up order — create → platform credentials → start — and then keeps the
+ * documented bring-up order — create → start (the gateway seeds platform credentials at
+ * create) — and then keeps the
  * agent's declared config (persona AGENTS.md + tool_policy) and its skill pin converged
  * with the session's AgentConfig.
  *
  * the ZooClaw API PUTs bump config_version on EVERY call (they are not idempotent in the
  * resource-semantics sense — the API reference → Retry rules), so the kit
  * fingerprints what it applied (`<coreHash>|<skillId>` in the zooclaw_agents row) and
- * only writes actual drift. Credential PUTs additionally append a secret version per
- * call, so bring-up RECONCILES against the credential list instead of blind-PUTting.
+ * only writes actual drift.
  *
  * Takes a Store + ZooclawClient (both injected), so it's unit-testable with a fake client
  * + the in-memory store — only the real the ZooClaw API HTTP needs a live deployment.
@@ -26,12 +26,6 @@ import { AGENT_INSTRUCTION, AGENT_MODEL, buildToolPolicy, type AgentConfig } fro
 export interface ProvisionConfig {
   /** The org anchor for every agent this deployment creates (ZOOCLAW_ORG_ID). */
   orgId: string
-  /** INTERNAL MODE ONLY. LiteLLM key written as the agent's `litellm` platform
-   *  credential. Unused (and unobtainable) in gateway mode - see gatewaySeedsCredentials. */
-  litellmKey?: string
-  /** INTERNAL MODE ONLY. Token written as the agent's `user-internal-token` platform
-   *  credential. Unused in gateway mode - see gatewaySeedsCredentials. */
-  userInternalToken?: string
   /** Optional Environment to pin at create (omit → the system default ready version). */
   environmentId?: string
   /** FIXED-AGENT MODE (ZOOCLAW_AGENT_ID): use this pre-built agent for everyone and
@@ -44,12 +38,6 @@ export interface ProvisionConfig {
    *  already stored, so closing it actually revokes the capability instead of
    *  grandfathering it. */
   agentPicker?: boolean
-  /** GATEWAY MODE: the public `/service/v1` gateway seeds both platform credentials
-   *  itself on a successful create, and blocks `credentials/*` with a 404. So the kit
-   *  must NOT write them — the litellmKey/userInternalToken above are unused, and an
-   *  external developer could not obtain them anyway. Verified on staging 2026-08-06:
-   *  the gateway seeds but does NOT start, so `start` below is still the kit's job. */
-  gatewaySeedsCredentials?: boolean
 }
 
 export interface ProvisionedAgent {
@@ -151,11 +139,6 @@ export function createResourceFor(email: string, cfg: ProvisionConfig): AgentRes
     labels: { app: 'zooclaw-app-kit', user: email },
     tool_policy: {},
     sandbox: { scope: 'agent' },
-    // Skip the BOOTSTRAP onboarding playbook: a chat app wants the configured persona
-    // applied, not a first turn that interviews the user to write its own.
-    onboarding: false,
-    // Pre-warm the sandbox so the first message doesn't pay the cold-start.
-    warm: true,
     ...(cfg.environmentId ? { environment_id: cfg.environmentId } : {}),
   }
 }
@@ -205,43 +188,6 @@ export async function ensureAgentConfig(store: Store, client: ZooclawClient, ema
   return changed
 }
 
-/** Reconcile the two REQUIRED platform credentials: list what exists, PUT only what's
- *  missing (each PUT appends a secret version + bumps config_version, so a bring-up
- *  retry must not blind-replay a credential that already landed — contract Retry rules).
- *  `force` re-PUTs both regardless: used for the explicit platform_credentials_required
- *  heal, where existence evidently wasn't sufficient. */
-async function reconcilePlatformCredentials(client: ZooclawClient, agentId: string, cfg: ProvisionConfig, force = false): Promise<void> {
-  if (cfg.gatewaySeedsCredentials) return // gateway owns this and 404s the routes
-  const have = force ? new Set<string>() : new Set((await client.listCredentials(agentId)).map((c) => c.app))
-  if (!cfg.litellmKey || !cfg.userInternalToken) {
-    throw new Error(
-      'Internal provisioning needs ZOOCLAW_LITELLM_KEY and ZOOCLAW_USER_INTERNAL_TOKEN. ' +
-        'Use ZOOCLAW_API_KEY (gateway mode) instead - the gateway seeds both for you.',
-    )
-  }
-  if (!have.has('litellm')) await client.putCredential(agentId, 'litellm', { api_key: cfg.litellmKey })
-  if (!have.has('user-internal-token')) await client.putCredential(agentId, 'user-internal-token', { token: cfg.userInternalToken })
-}
-
-/** Start the agent, self-healing the one documented start failure: 409
- *  platform_credentials_required → force-write both platform credentials → start again. */
-async function startWithCredentialHeal(client: ZooclawClient, agentId: string, cfg: ProvisionConfig): Promise<void> {
-  try {
-    await client.startAgent(agentId)
-  } catch (e) {
-    if (e instanceof ZooclawError && e.status === 409 && e.type === 'platform_credentials_required') {
-      // In gateway mode this heal cannot work (the credential routes are 404) — and it
-      // should never fire, since the gateway seeded them at create. Surface it instead of
-      // silently retrying a start that will fail the same way.
-      if (cfg.gatewaySeedsCredentials) throw e
-      await reconcilePlatformCredentials(client, agentId, cfg, true)
-      await client.startAgent(agentId)
-      return
-    }
-    throw e
-  }
-}
-
 /**
  * Create a usable fresh agent, navigating the Idempotency-Key semantics (uniqueness
  * domain (agent.create, key), full-body match — contract Retry rules):
@@ -270,16 +216,15 @@ async function createFreshAgent(client: ZooclawClient, email: string, cfg: Provi
     }
   }
 
+  // Platform credentials are seeded by the gateway at create; the kit only starts.
   try {
-    await reconcilePlatformCredentials(client, created.agent_id, cfg)
-    await startWithCredentialHeal(client, created.agent_id, cfg)
+    await client.startAgent(created.agent_id)
   } catch (e) {
     // 404 here means the "created" agent doesn't exist: the stable key replayed a
     // soft-deleted create. Mint a genuinely new agent under a unique key.
     if (e instanceof ZooclawError && e.status === 404) {
       created = await client.createAgent(body, freshKey())
-      await reconcilePlatformCredentials(client, created.agent_id, cfg)
-      await startWithCredentialHeal(client, created.agent_id, cfg)
+      await client.startAgent(created.agent_id)
     } else {
       throw e
     }
@@ -294,8 +239,8 @@ async function createFreshAgent(client: ZooclawClient, email: string, cfg: Provi
  * resolveAgent picks the source; what happens next depends entirely on whether the kit owns
  * the agent:
  *
- *   BORROWED (conversation / binding / env-fixed) — used as-is. No create, no credential
- *     writes, and deliberately NO ensureAgentConfig: that agent belongs to a real user, and
+ *   BORROWED (conversation / binding / env-fixed) — used as-is. No create, and
+ *     deliberately NO ensureAgentConfig: that agent belongs to a real user, and
  *     PUTting the kit's persona/tool_policy over it would silently rewrite their agent (and
  *     bump config_version on every call). Sessions are still per-conversation, so borrowing
  *     one does not mix conversations. `managed: false` is what the UI reads to disable the
@@ -304,7 +249,7 @@ async function createFreshAgent(client: ZooclawClient, email: string, cfg: Provi
  *   PER-USER — the kit's own agent. Reuse path verifies the cached id still exists on THIS
  *     the ZooClaw API (a 404 → drop the row and re-provision; any other error is rethrown so
  *     a blip never discards a good agent) and re-starts it if it isn't running. Fresh path:
- *     create → credentials → start (createFreshAgent). Only here is config applied.
+ *     create → start (createFreshAgent). Only here is config applied.
  */
 export async function agentFor(
   store: Store,
@@ -324,7 +269,7 @@ export async function agentFor(
     try {
       const agent = await client.getAgent(resolved.agentId)
       agentId = resolved.agentId
-      if (agent.status?.desired_state !== 'running') await startWithCredentialHeal(client, agentId, cfg)
+      if (agent.status?.desired_state !== 'running') await client.startAgent(agentId)
     } catch (e) {
       if (e instanceof ZooclawError && e.status === 404) {
         console.log(`[provision] cached agent ${resolved.agentId} not found on this the ZooClaw API — reprovisioning`)

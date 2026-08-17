@@ -38,20 +38,12 @@ export interface Env {
    * gateway mode.
    */
   ZOOCLAW_ORG_ID?: string
-  /** INTERNAL MODE ONLY. LiteLLM key written as each agent's `litellm` platform
-   *  credential. In gateway mode the gateway seeds this and the kit never writes it. */
-  ZOOCLAW_LITELLM_KEY?: string
-  /** INTERNAL MODE ONLY. Token written as each agent's `user-internal-token` credential.
-   *  In gateway mode the gateway seeds this and the kit never writes it. */
-  ZOOCLAW_USER_INTERNAL_TOKEN?: string
   /** Optional Environment id to pin at agent create (omit → system default). */
   ZOOCLAW_ENVIRONMENT_ID?: string
   /**
    * FIXED-AGENT MODE. When set, every user of this deployment talks to THIS pre-built
-   * agent and the kit provisions nothing — no create, no platform credentials, no config
-   * PUT (see worker/provision.ts). That is the only way to run without
-   * ZOOCLAW_LITELLM_KEY / ZOOCLAW_USER_INTERNAL_TOKEN, which are per-user credentials an
-   * external developer cannot mint: an agent built in the ZooClaw app already has them.
+   * agent and the kit provisions nothing — no create, no config PUT (see
+   * worker/provision.ts).
    *
    * It is a DEMO/single-tenant mode, not a multi-tenant one — everyone shares one agent's
    * config (each conversation still gets its own isolated session, so they don't share
@@ -147,14 +139,6 @@ const KIT_ENV_VAR_DOCS: Record<ConfigurableEnvKey, Omit<EnvVarDoc, 'name'>> = {
     effect: 'ownership.org_id on created agents. Discarded in gateway mode — the gateway substitutes the key’s own tenant.',
     secret: false,
   },
-  ZOOCLAW_LITELLM_KEY: {
-    effect: 'Internal mode only: written as the agent’s `litellm` platform credential. Unused in gateway mode (credentials/* is 404).',
-    secret: true,
-  },
-  ZOOCLAW_USER_INTERNAL_TOKEN: {
-    effect: 'Internal mode only: written as the agent’s `user-internal-token` credential. Unused in gateway mode.',
-    secret: true,
-  },
   ZOOCLAW_ENVIRONMENT_ID: {
     effect: 'resource.environment_id at agent create. The pin locks after the first sandbox — later changes return 409 environment_locked.',
     secret: false,
@@ -232,9 +216,6 @@ export function provisionConfig(env: Env): import('./provision.ts').ProvisionCon
   return {
     // Ignored in gateway mode; the gateway substitutes the API key's own tenant.
     orgId: env.ZOOCLAW_ORG_ID ?? 'gateway-assigned',
-    litellmKey: env.ZOOCLAW_LITELLM_KEY,
-    userInternalToken: env.ZOOCLAW_USER_INTERNAL_TOKEN,
-    gatewaySeedsCredentials: isGatewayMode(env),
     agentPicker: agentPickerEnabled(env),
     ...(env.ZOOCLAW_ENVIRONMENT_ID ? { environmentId: env.ZOOCLAW_ENVIRONMENT_ID } : {}),
     ...(env.ZOOCLAW_AGENT_ID ? { fixedAgentId: env.ZOOCLAW_AGENT_ID } : {}),

@@ -8,12 +8,16 @@ thing again. The difference between the two answers is what a skill *is*.
 ## Run it
 
 ```bash
+cd skill-lab              # every command below runs in this directory
 cp .env.example .env      # paste your ZOOCLAW_API_KEY
-pnpm install
-pnpm dev                  # http://localhost:3000
+npm install
+npm run dev               # http://localhost:3000
 ```
 
-Needs **Node 22.20 or later** — the floor across this repo, set by the `skills` CLI.
+Needs **Node 22.20 or later** — the floor across this repo, set by the `skills` CLI. `npm`
+ships with Node; `pnpm install` / `pnpm dev` work too if you have it.
+
+Port 3000 busy, or running `chat` at the same time? `PORT=3001 npm run dev`.
 
 One value this time — no agent id. **This template builds its own agent** on first run
 and remembers it in `.agent`, so restarting does not litter your org. Point it at an agent
@@ -52,6 +56,14 @@ description: Use whenever the user asks about X, mentions Y, or wants to do Z.
 
 Whatever the agent should know or do.
 ```
+
+> **Everyone in one organization shares one skill namespace.** Skills upload at `org` scope and
+> are matched by **name**. If a colleague uploads a different `coffee-order`, it becomes a new
+> *version* of the same skill and your agent follows it. In a workshop or a shared org, prefix
+> your skill name with something of your own — `lily-pricing`, not `pricing`.
+>
+> Uninstalling only detaches the skill from your agent; it stays in the org registry, so nobody
+> else loses it.
 
 **The `description` is the only part the agent reads when deciding whether your skill is
 relevant.** The body is loaded afterwards, and only if the description won. A description

@@ -162,9 +162,10 @@ async function install(dir) {
 }
 
 async function uninstall(skillId) {
+  // Detach from THIS agent only. Deliberately not `deleteSkill()`: skills are uploaded at
+  // `org` scope and matched by name across the whole organization, so deleting the registry
+  // row would yank the skill out from under every colleague who installed the same name.
   await zc.deleteAgentSkill(AGENT_ID, skillId)
-  // Also drop it from the org registry so re-installing starts from version 1 again.
-  await zc.deleteSkill(skillId).catch(() => {})
 }
 
 // ─── asking ──────────────────────────────────────────────────────────────────
@@ -221,16 +222,28 @@ const server = createServer(async (req, res) => {
       return json(res, 200, await state())
     }
 
+    // These two get their own try/catch: an upload can fail for reasons the participant can
+    // act on (a name mismatch, a bad frontmatter), and `internal server error` hides all of it.
     if (req.method === 'POST' && url.pathname === '/api/install') {
       const { dir } = await readJson(req)
-      const result = await install(dir)
-      return json(res, 200, { ...result, state: await state() })
+      try {
+        const result = await install(dir)
+        return json(res, 200, { ...result, state: await state() })
+      } catch (e) {
+        console.error(e)
+        return json(res, e?.status ?? 500, { error: describe(e) })
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/api/uninstall') {
       const { skillId } = await readJson(req)
-      await uninstall(skillId)
-      return json(res, 200, await state())
+      try {
+        await uninstall(skillId)
+        return json(res, 200, await state())
+      } catch (e) {
+        console.error(e)
+        return json(res, e?.status ?? 500, { error: describe(e) })
+      }
     }
 
     if (req.method === 'POST' && url.pathname === '/api/ask') {
@@ -265,6 +278,11 @@ function describe(e) {
     }
     return `ZooClaw error ${e.status}${e.type ? ` ${e.type}` : ''}: ${e.message}`
   }
+  // A transport failure arrives as the two words 'fetch failed'; the real reason is on .cause.
+  if (e?.name === 'TypeError' && /fetch failed/i.test(e.message ?? '')) {
+    const why = e.cause?.message ?? e.cause?.code ?? 'no route to the gateway'
+    return `Could not reach the ZooClaw gateway (${why}). Check your network, VPN or proxy, and ZOOCLAW_BASE_URL if you set one.`
+  }
   return e?.message ?? String(e)
 }
 
@@ -286,13 +304,21 @@ async function readJson(req) {
 async function loadDotEnv(path) {
   const raw = await readFile(path, 'utf8').catch(() => null)
   if (!raw) return
-  for (const line of raw.split('\n')) {
+  for (const line of raw.split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/i)
     if (!m) continue
     const value = m[2].trim().replace(/^(['"])(.*)\1$/, '$2')
     if (value && process.env[m[1]] === undefined) process.env[m[1]] = value
   }
 }
+
+server.on('error', (e) => {
+  if (e.code === 'EADDRINUSE') {
+    console.error(`\nPort ${PORT} is already in use.\n\n  PORT=3001 npm run dev\n`)
+    process.exit(1)
+  }
+  throw e
+})
 
 server.listen(PORT, async () => {
   const s = await state().catch(() => null)

@@ -8,12 +8,16 @@ Two values, two commands, a chat box. No database, no build step, no framework �
 ## Run it
 
 ```bash
+cd chat                   # every command below runs in this directory
 cp .env.example .env      # paste your ZOOCLAW_API_KEY and ZOOCLAW_AGENT_ID
-pnpm install
-pnpm dev                  # http://localhost:3000
+npm install
+npm run dev               # http://localhost:3000
 ```
 
-Needs **Node 22.20 or later** — the floor across this repo, set by the `skills` CLI.
+Needs **Node 22.20 or later** — the floor across this repo, set by the `skills` CLI. `npm`
+ships with Node; `pnpm install` / `pnpm dev` work too if you have it.
+
+Port 3000 busy, or running `skill-lab` at the same time? `PORT=3001 npm run dev`.
 
 Both values are copied from the ZooClaw workspace UI: the API key from your org admin,
 the agent id (`agt_…`) from your agent's detail dialog.

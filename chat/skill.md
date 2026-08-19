@@ -7,9 +7,9 @@ here was verified against a live deployment on 2026-08-11, not read off a spec.
 
 ## Mental model
 
-The server holds one secret and one number. `ZOOCLAW_API_KEY` authenticates the whole
+The server holds one secret and one token. `ZOOCLAW_API_KEY` authenticates the whole
 organization, so it can never reach the browser — that is the entire reason a server
-exists in a template with no database. The number is a per-session read cursor
+exists in a template with no database. The token is a per-session stream resume cursor
 (`cursors` in `server.mjs`), so a new turn streams only new events.
 
 Everything else lives in ZooClaw. The browser stores a session id in `localStorage`; the
@@ -17,44 +17,33 @@ transcript is fetched back from the platform on reload. There is nothing to pers
 
 ---
 
-## The event log does not contain your messages
+## The event log IS the conversation
 
-This is the single most likely thing to get wrong, because the mistake looks like it
-works: the first turn renders fine and the bug only appears on reload.
-
-`listEvents()` and `streamEvents()` return the same 19 event types, and **not one of them
-is `user.*`**. Verified: send a message containing a unique marker, then read the event
-log back — the marker is absent, and so is any `user.` event type.
-
-```
-seq=1  run.started        <- payload has {agentId, trigger, inboundMessageId}, no text
-seq=2  agent.lifecycle
-seq=3  agent.item
-seq=4  agent.thinking
-seq=5  agent.assistant    <- the reply
-seq=6  agent.lifecycle
-seq=7  run.finished
-```
-
-The transcript is a different surface:
+The log is bidirectional: what you post echoes back as `user.message` events — with a
+`processedAt` that flips from `null` to a timestamp once the agent consumes it —
+alongside the agent's `agent.assistant` replies. One filtered read rebuilds the whole
+two-sided transcript, for a session of any length, from any device:
 
 ```js
-const session = await zc.getSession(agentId, sessionId, { history: true })
-// session.history: [{ seq, entry_type:'message', entry:{ message:{ role, content:[…] } }, created_at }]
+const events = await zc.listAllEvents(agentId, sessionId, {
+  types: ['user.message', 'agent.assistant'],
+})
+// user rows:      messageText(ev.payload)          — payload is { content: [...] }
+// assistant rows: messageText(ev.payload.message)  — payload.message is { role, content }
 ```
 
-Rows are role-tagged and content is a block list. Keep `type:'text'` blocks, drop
-`type:'thinking'` blocks — and note the first text block is often an empty string, so
-filter for truthy text rather than taking `content[0]`.
+`messageText` reads the text blocks and skips the model's `thinking` scratchpad blocks on
+its own. This template's `/api/history` is exactly that loop.
 
-**Do not try to join the two by `seq`.** They are independent sequences over the same
-session (transcript `seq` 1,2,3,4 for four messages; event `seq` 1..14 for the same two
-turns). Use the event log for the live stream and tool activity; use history for the
-transcript. This template does exactly that.
+`getSession(agentId, sessionId, { history: true })` still exists — the at-rest transcript
+is where per-turn token usage and the model that actually answered live — but it returns
+only the most recent rows, takes no cursor, and is no longer needed to render a chat.
 
-`getSession` also takes no `after`/offset — it returns the most recent rows, capped. A
-very long conversation loses its oldest turns silently. Fine here; not fine if you build
-on it.
+Resume tokens: every streamed event carries `ev.cursor`. Persist the last one and pass
+`{ cursor }` to `streamEvents` to continue exactly where you stopped. Tokens are opaque —
+never mint one from a `seq`; when you have none (fresh process), stream from the start
+and drop events at or below the last `seq` you already rendered, as `streamTurn` here
+does.
 
 ---
 

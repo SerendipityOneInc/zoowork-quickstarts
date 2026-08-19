@@ -14,6 +14,7 @@ import {
   ZooclawError,
   assistantText,
   isRunFinished,
+  messageText,
   runOutcome,
   toolCall,
 } from '@zooclaw-agents/sdk'
@@ -69,23 +70,19 @@ async function ensureRunning(agentId) {
 
 // ─── conversation state ──────────────────────────────────────────────────────
 
-// The only thing this server remembers: how far we have read each session's event log,
-// so a new turn streams only new events. Everything else lives in ZooClaw — the browser
-// holds a session id, and the transcript is fetched back from the platform on reload.
+// The only thing this server remembers: each session's stream resume token, so a new
+// turn streams only new events. Everything else lives in ZooClaw — the browser holds a
+// session id, and the transcript is fetched back from the platform on reload.
 const cursors = new Map()
 
-async function cursorFor(sessionId) {
-  if (cursors.has(sessionId)) return cursors.get(sessionId)
-  // Unknown (server restarted): find the end of the log so we do not replay old turns.
-  const events = await listEvents(sessionId)
-  const last = events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0)
-  cursors.set(sessionId, last)
-  return last
-}
-
-async function listEvents(sessionId) {
-  const res = await zc.listEvents(AGENT_ID, sessionId)
-  return Array.isArray(res) ? res : (res?.events ?? [])
+async function resumeFor(sessionId) {
+  const cursor = cursors.get(sessionId)
+  if (cursor) return { cursor }
+  // Server restarted: no token in hand, and tokens are opaque — never mint one from a
+  // seq. Stream from the log start instead and drop everything at or below the known
+  // end; the first live event hands us a fresh token to remember.
+  const events = await zc.listAllEvents(AGENT_ID, sessionId)
+  return { skipThrough: events.reduce((m, e) => Math.max(m, e.seq ?? 0), 0) }
 }
 
 // ─── routes ──────────────────────────────────────────────────────────────────
@@ -122,31 +119,22 @@ const server = createServer(async (req, res) => {
 
 // ─── reading a conversation back ─────────────────────────────────────────────
 
-// IMPORTANT, and the one thing most likely to be got wrong:
-//
-// The event log (`listEvents` / `streamEvents`) contains NO user messages. Its 19 event
-// types are all `run.*` and `agent.*`; what you sent is simply not in it. Rebuilding a
-// transcript from the event log gives you assistant bubbles and nothing else.
-//
-// The transcript lives on a different surface: `getSession(..., { history: true })`,
-// which returns proper role-tagged rows. Use the event log for the live stream and for
-// tool activity; use this for history. Do not try to join their `seq` numbers — they are
-// separate sequences over the same session.
+// ONE surface. The event log is bidirectional: what you post echoes back as
+// `user.message` events alongside the agent's `agent.assistant` replies, so the whole
+// two-sided transcript rebuilds from a single filtered read — for a session of any
+// length, from any device. (`getSession(..., { history: true })` still exists; you only
+// need it for per-turn token usage and the model that actually answered.)
 async function history(sessionId) {
-  const session = await zc.getSession(AGENT_ID, sessionId, { history: true })
-  const rows = session?.history ?? []
+  const events = await zc.listAllEvents(AGENT_ID, sessionId, {
+    types: ['user.message', 'agent.assistant'],
+  })
   const out = []
-  for (const row of rows) {
-    const message = row?.entry?.message
-    if (!message?.role) continue
-    // Content is a block list. Keep text blocks; drop `thinking` blocks (they are the
-    // model's scratchpad, and the first text block is often an empty placeholder).
-    const text = (Array.isArray(message.content) ? message.content : [])
-      .filter((b) => b?.type === 'text' && b.text)
-      .map((b) => b.text)
-      .join('')
-      .trim()
-    if (text) out.push({ role: message.role, text })
+  for (const ev of events) {
+    const user = ev.eventType === 'user.message'
+    // `messageText` reads the text blocks out of either payload shape and skips the
+    // model's `thinking` scratchpad blocks on its own.
+    const text = messageText(user ? ev.payload : ev.payload.message).trim()
+    if (text) out.push({ role: user ? 'user' : 'assistant', text })
   }
   return out
 }
@@ -165,7 +153,7 @@ async function chat(req, res) {
   const send = (frame) => res.write(`data: ${JSON.stringify(frame)}\n\n`)
 
   let sessionId = session
-  let after
+  let resume = {}
 
   try {
     if (!sessionId) {
@@ -176,17 +164,16 @@ async function chat(req, res) {
         initial_events: [{ type: 'user.message', content: message }],
       })
       sessionId = created.session_id
-      cursors.set(sessionId, 0)
       send({ type: 'session', session: sessionId })
     } else {
-      after = await cursorFor(sessionId)
+      resume = await resumeFor(sessionId)
       // Follow-up turns post into the SAME session. The platform holds the context, so
-      // there is no history to re-send. The returned event id is the `inboundMessageId`
-      // of the run this message starts, if you ever need to tie the two together.
+      // there is no history to re-send. The accepted event comes back as the full event
+      // object your message will show up as in the log (its `seq` included).
       await zc.postEvents(AGENT_ID, sessionId, [{ type: 'user.message', content: message }])
     }
 
-    await streamTurn(sessionId, after, send)
+    await streamTurn(sessionId, resume, send)
   } catch (e) {
     console.error(e)
     send({ type: 'error', message: describe(e) })
@@ -194,14 +181,17 @@ async function chat(req, res) {
   res.end()
 }
 
-async function streamTurn(sessionId, after, send) {
+async function streamTurn(sessionId, resume, send) {
   const ctl = new AbortController()
   const budget = setTimeout(() => ctl.abort(), 5 * 60_000)
   let outcome
 
   try {
-    for await (const event of zc.streamEvents(AGENT_ID, sessionId, { after, signal: ctl.signal })) {
-      if (event.seq) cursors.set(sessionId, event.seq)
+    const opts = resume.cursor ? { cursor: resume.cursor, signal: ctl.signal } : { signal: ctl.signal }
+    for await (const event of zc.streamEvents(AGENT_ID, sessionId, opts)) {
+      if (event.cursor) cursors.set(sessionId, event.cursor)
+      // Restart recovery: drop what the browser already rendered from /api/history.
+      if (resume.skipThrough && event.seq > 0 && event.seq <= resume.skipThrough) continue
 
       // Honest progress, not a fake typing animation. Replies arrive as ONE whole
       // message — there is no token-by-token delta — so these events are what you have

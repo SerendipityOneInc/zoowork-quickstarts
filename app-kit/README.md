@@ -177,9 +177,15 @@ only PUTs actual drift.
 
 One Zooclaw session per conversation. The first turn creates it with the prompt as
 `initial_events: [{type:'user.message', ...}]`; follow-up turns `POST .../events` into
-the same session. Streaming rides `GET .../events/stream` (SSE) with `?after=<seq>`
-resume; a turn is driven in bounded ~20s Durable Object alarm windows, each resuming from
-the persisted event cursor.
+the same session. Streaming rides `GET .../events/stream` (SSE) on the unified lane with
+**opaque cursor resume** (SDK 0.2.0): every streamed event carries a server-minted
+resume token, the DO persists the newest one (`sessionCursor`), and a turn is driven in
+bounded ~20s Durable Object alarm windows, each resuming from that token. Tokens are
+never derived from a seq — a conversation persisted before tokens existed (a bare
+numeric `sessionSeq`) recovers on a cursorless stream that client-side skips events at
+or below the stored number, then earns its token from the first streamed event. The
+numeric `?after=<seq>` lane still exists upstream but is deprecated and engine-only (it
+drops the echoed user inputs), so the kit no longer passes it.
 
 **Turn end is `run.finished`.** It is the terminal run boundary and carries
 `payload.status: succeeded | failed | aborted`. The session stream is still per-session and

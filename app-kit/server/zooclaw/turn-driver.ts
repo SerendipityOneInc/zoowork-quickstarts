@@ -6,10 +6,20 @@
  *    state. Its frame shapes are exactly what `deriveChat` (generic chat) and a vertical's
  *    domain derive both read, so there is one frame vocabulary, not three.
  *  - `driveTurn(...)` is the stateful driver: it pulls events from `@zooclaw-agents/sdk`
- *    (server-side `after` resume; session-scoped stream), translates each, pushes to an
+ *    (server-side cursor resume; session-scoped stream), translates each, pushes to an
  *    INJECTED sink (the DO injects "emit → store"; a probe injects "push → array"), and
- *    accumulates shown text so the caller can decide drain/backfill. It returns the last
- *    durable seq so the caller's window loop can resume.
+ *    accumulates shown text so the caller can decide drain/backfill. It returns the newest
+ *    resume token (plus the highest seq, the recovery bound) so the caller's window loop
+ *    can resume.
+ *
+ * RESUME IS AN OPAQUE TOKEN (SDK 0.2.0): streamed events carry `ev.cursor` and the next
+ * window passes it back as `{ cursor }` — the server replays from right after that event.
+ * Tokens are minted by the server only; never derive one from a seq. The numeric `after`
+ * option still exists on the SDK but selects the DEPRECATED engine-only lane, which does
+ * not carry echoed user input events — this driver never passes it. A caller restored from
+ * pre-token state (a stored number) resumes on a CURSORLESS stream instead, with
+ * `skipThrough` dropping everything already handled, and earns its first token from the
+ * first streamed event (skipped ones included).
  *
  * THE WIRE IS THE SDK'S PROBLEM, NOT OURS. Event envelopes arrive in two different shapes
  * (REST snake_case, SSE camelCase) and the payloads are nested; the SDK normalizes both and
@@ -38,19 +48,33 @@ export interface TurnEnd {
   terminal: boolean
   /** The run's outcome: succeeded | failed | aborted. */
   status?: string
-  /** Highest durable seq observed — feed back as `after` to resume the next window. */
+  /** Newest resume token in hand (the last `ev.cursor` seen, else the one passed in) —
+   *  persist it and feed it back as `cursor` to resume the next window. The key is absent
+   *  only while NO event has ever carried a token (pre-token server, or a window that saw
+   *  no events on a cursorless stream); resume then falls back to skipThrough=lastSeq. */
+  cursor?: string
+  /** Highest durable seq observed. Seqs still ride every event — only the RESUME
+   *  mechanism moved to opaque tokens — so this stays the skipThrough recovery bound and
+   *  the caller's progress signal. Never pass it to the SDK as `after`. */
   lastSeq: number
   /** Set when the window died mid-stream (SSE reset, sink/D1 failure). The frames emitted
-   *  before the error are ALREADY durable, so the caller must persist lastSeq/emittedText
-   *  BEFORE handling this as a retryable error — retrying from the pre-window cursor
-   *  would re-append everything this window already wrote (duplicate bubbles that survive
-   *  refresh, since frames are the source of truth). */
+   *  before the error are ALREADY durable, so the caller must persist cursor/lastSeq/
+   *  emittedText BEFORE handling this as a retryable error — retrying from the pre-window
+   *  cursor would re-append everything this window already wrote (duplicate bubbles that
+   *  survive refresh, since frames are the source of truth). */
   streamError?: unknown
 }
 
 export interface DriveOpts {
-  /** Resume cursor: the server skips events with seq <= after. */
-  after?: number
+  /** Opaque resume token from a previous window (`ev.cursor`): the server replays from
+   *  right after that event. Omit to stream the whole log from the start. */
+  cursor?: string
+  /** Client-side replay guard: events with 0 < seq <= skipThrough were already handled by
+   *  an earlier window/turn and are dropped before translation — a replayed
+   *  `run.finished` from a PREVIOUS turn must not terminate this one. Skipped events
+   *  still hand back their `cursor`, which is how a caller restored from a pre-token
+   *  numeric cursor (cursorless stream) earns its first token. */
+  skipThrough?: number
   signal?: AbortSignal
   /** Answer text already shown (normText-accumulated) — pass a persisted ref across
    *  windows so a re-delivered final message isn't doubled after a resume. */
@@ -80,6 +104,9 @@ export const recordEmitted = (ref: { value: string }, text: string): void => {
  *    this stream. The durable final text is `agent.assistant`.
  *  - `message.outbound` — proactive delivery (message tool / schedule / heartbeat), which
  *    belongs to whatever channel it targets, not to this turn's transcript.
+ *  - input echoes (`user.message`, `user.interrupt`, …) — the unified stream carries the
+ *    session's own inputs back; the kit already rendered the prompt from its store, so an
+ *    echo is stream traffic, not new content.
  * They still ride through as `__zooclaw` debug frames so the debug pane can show the raw
  * stream; the chat derivation ignores any frame whose keys are all `__`-prefixed.
  */
@@ -126,15 +153,28 @@ export function translate(ev: SessionEvent): FrameData[] {
 
 export async function driveTurn(client: ZooclawClient, agentId: string, sessionId: string, sink: FrameSink, opts: DriveOpts = {}): Promise<TurnEnd> {
   const emitted = opts.emittedText ?? { value: '' }
-  let lastSeq = opts.after ?? 0
+  const skipThrough = opts.skipThrough ?? 0
+  let lastSeq = skipThrough
+  let cursor = opts.cursor
+  const withCursor = (end: TurnEnd): TurnEnd => (cursor === undefined ? end : { ...end, cursor })
 
   const push = async (frames: FrameData[]): Promise<void> => {
     for (const f of frames) await sink.emit(f)
   }
 
   try {
-    for await (const ev of client.streamEvents(agentId, sessionId, { after: lastSeq, signal: opts.signal })) {
+    for await (const ev of client.streamEvents(agentId, sessionId, {
+      ...(cursor === undefined ? {} : { cursor }),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    })) {
+      if (ev.cursor) cursor = ev.cursor
       if (ev.seq > lastSeq) lastSeq = ev.seq
+
+      // Replay guard: skip BEFORE translation (the seq > 0 test spares no-seq frames),
+      // so a replayed previous-turn `run.finished` cannot terminate this turn — but only
+      // after the token/seq bookkeeping above, so skipped events still advance the resume
+      // state (the pre-token restore path earns its first token here).
+      if (skipThrough && ev.seq > 0 && ev.seq <= skipThrough) continue
 
       if (ev.eventType === 'agent.assistant') {
         const text = assistantText(ev).trim()
@@ -148,7 +188,7 @@ export async function driveTurn(client: ZooclawClient, agentId: string, sessionI
       }
 
       if (isRunFinished(ev)) {
-        return { terminal: true, status: runOutcome(ev) ?? 'succeeded', lastSeq }
+        return withCursor({ terminal: true, status: runOutcome(ev) ?? 'succeeded', lastSeq })
       }
 
       await push(translate(ev))
@@ -156,10 +196,10 @@ export async function driveTurn(client: ZooclawClient, agentId: string, sessionI
   } catch (e) {
     // Frames emitted before the error are durable — return the progress WITH the error
     // instead of throwing it away, so the caller can persist the cursor before retrying.
-    return { terminal: false, lastSeq, streamError: e }
+    return withCursor({ terminal: false, lastSeq, streamError: e })
   }
 
   // The window aborted (idle/timer) or the server closed the stream before run.finished →
-  // the caller polls session status and either finalizes or resumes from lastSeq.
-  return { terminal: false, lastSeq }
+  // the caller polls session status and either finalizes or resumes from the cursor.
+  return withCursor({ terminal: false, lastSeq })
 }

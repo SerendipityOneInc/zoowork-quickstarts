@@ -2,8 +2,8 @@
  * TaskDO — the per-task turn runner, an ALARM-DRIVEN Durable Object (one per taskId). The
  * CF-welded execution leg: a turn streams the ZooClaw API's session event stream for minutes,
  * but `ctx.waitUntil` does NOT keep a DO alive past the request, so the turn lives in
- * alarm() and advances in bounded windows; progress (sessionId, lastEventSeq, …) is
- * persisted in DO storage so a resumed alarm continues idempotently.
+ * alarm() and advances in bounded windows; progress (sessionId, resumeCursor,
+ * lastEventSeq, …) is persisted in DO storage so a resumed alarm continues idempotently.
  *
  *   runTurn() → persist intent + setAlarm(now)   (rejected if a turn is in flight)
  *   alarm()   → ensure agent + session → submit user.message → driveTurn one stream
@@ -74,10 +74,17 @@ interface TurnState {
   /** Did this turn already create the session / post its user.message? Guards a retried
    *  alarm from double-sending. */
   submitted: boolean
-  /** Highest durable session-event seq processed — resume cursor across windows. Zooclaw
-   *  seqs are SESSION-scoped (they don't reset per turn), so this is seeded from the DO's
-   *  persisted 'sessionSeq' at submit time — starting a follow-up turn at 0 would replay
-   *  the whole conversation's events into the new turn's frames. */
+  /** Opaque stream resume token — the newest `ev.cursor` a window handed back (SDK 0.2.0;
+   *  persisted as 'sessionCursor' across turns). Tokens are server-minted only. Absent
+   *  until the conversation's first streamed event, and on turns restored from pre-token
+   *  state — those resume cursorless with lastEventSeq as the skipThrough bound. */
+  resumeCursor?: string
+  /** Highest durable session-event seq processed — the skipThrough/progress bound, NOT
+   *  the resume mechanism (that's resumeCursor; the SDK's numeric `after` selects the
+   *  deprecated engine-only lane and is never passed). Zooclaw seqs are SESSION-scoped
+   *  (they don't reset per turn), so this is seeded from the DO's persisted 'sessionSeq'
+   *  at submit time — starting a follow-up turn at 0 would replay the whole
+   *  conversation's events into the new turn's frames. */
   lastEventSeq: number
   /** Exact-match ledger of assistant text shown (see turn-driver recordEmitted), so a
    *  re-delivered final message isn't doubled across windows. */
@@ -162,19 +169,31 @@ export class TaskDO extends DurableObject<Env> {
     }
   }
 
-  /** Best-effort: advance the conversation cursor to the session's current head, so a
-   *  turn that ends EARLY (cancel / expiry / give-up) doesn't leave the cursor behind
-   *  output the backend is still flushing — the next turn would replay that late output
-   *  into its own bubble. Narrows the race; events that land after this snapshot are
-   *  still possible and accepted. */
+  /** Best-effort: advance the conversation's numeric skip bound to the session's current
+   *  head, so a turn that ends EARLY (cancel / expiry / give-up) doesn't leave the bound
+   *  behind output the backend is still flushing — the next turn would replay that late
+   *  output into its own bubble. Walks the unified history by page cursor, seeded from
+   *  the stored stream token when one exists (a list page's `next_cursor` is the same
+   *  kind of token as a streamed event's `cursor`), from the log start otherwise
+   *  (pre-token conversations). Only 'sessionSeq' moves here: REST pages carry no
+   *  per-event stream token, and a skip bound composes with any resume mode — nothing is
+   *  minted. Narrows the race; events that land after this snapshot are still possible
+   *  and accepted. */
   private async advanceSessionCursor(agentId: string, sessionId: string): Promise<void> {
     try {
-      let cur = (await this.ctx.storage.get<number>('sessionSeq')) ?? 0
-      for (let page = 0; page < 4; page++) {
-        const events = await this.client().listEvents(agentId, sessionId, { after: cur, limit: 500 })
-        for (const ev of events) if (ev.seq > cur) cur = ev.seq
-        await this.ctx.storage.put('sessionSeq', cur)
-        if (events.length < 500) return
+      let bound = (await this.ctx.storage.get<number>('sessionSeq')) ?? 0
+      let pageCursor = await this.ctx.storage.get<string>('sessionCursor')
+      for (let pages = 0; pages < 8; pages++) {
+        const page = await this.client().listEventsPage(agentId, sessionId, {
+          ...(pageCursor === undefined ? {} : { cursor: pageCursor }),
+          limit: 500,
+        })
+        for (const ev of page.events) if (ev.seq > bound) bound = ev.seq
+        await this.ctx.storage.put('sessionSeq', bound)
+        // Stop on the tail, a server without cursor pagination (hasMore undefined), or a
+        // cursor that failed to advance — the walk must stay finite.
+        if (!page.hasMore || !page.nextCursor || page.nextCursor === pageCursor || page.events.length === 0) return
+        pageCursor = page.nextCursor
       }
     } catch {
       /* cursor advance is an optimization — never block finalize on it */
@@ -354,10 +373,17 @@ export class TaskDO extends DurableObject<Env> {
         // provisioning awaits must stop the message from being posted at all.
         if (!(await this.ownedTurn(t.promptId))) return
 
-        // Seed the resume cursor from the conversation's persisted tail: session seqs
-        // are durable across turns, and everything at or before the tail was already
-        // rendered by earlier turns (our just-posted user.message lands after it and is
-        // skipped as a user_echo).
+        // Seed the resume state from the conversation's persisted tail: the opaque stream
+        // token when one has been earned, plus the numeric high-water seq as the
+        // skipThrough bound. A conversation stored BEFORE tokens existed has only the
+        // number — driveTurn then recovers on a cursorless stream that skips events at or
+        // below it, and 'sessionCursor' is written the moment the first streamed event
+        // hands a token back (the window-end persist below). Session seqs are durable
+        // across turns, and everything at or before the tail was already rendered by
+        // earlier turns; our just-posted user.message echoes back AFTER it, riding
+        // through as a chat-invisible debug frame (the unified lane carries input echoes).
+        const savedCursor = await this.ctx.storage.get<string>('sessionCursor')
+        if (savedCursor) t.resumeCursor = savedCursor
         t.lastEventSeq = (await this.ctx.storage.get<number>('sessionSeq')) ?? 0
 
         try {
@@ -375,12 +401,15 @@ export class TaskDO extends DurableObject<Env> {
             await this.store.setTaskSessionId(t.taskId, sessionId)
           } else {
             const ack = await client.postEvents(agentId, sessionId, [{ type: 'user.message', content: t.prompt }])
-            // Fast cursor: when the 202 echoes our event's seq as a numeric id, everything
-            // BEFORE our message belongs to earlier turns — skip it wholesale. This also
-            // absorbs any late output a canceled/expired previous turn flushed after its
-            // cursor snapshot.
-            const firstId = Number(ack.events[0]?.id)
-            if (Number.isFinite(firstId) && firstId > 0) t.lastEventSeq = Math.max(t.lastEventSeq, firstId - 1)
+            // Fast skip bound: unified servers echo the accepted event back as a full
+            // event object (`seq` included; older shapes carry the seq as a numeric id),
+            // and everything BEFORE our message belongs to earlier turns — skip it
+            // wholesale. This also absorbs any late output a canceled/expired previous
+            // turn flushed after its cursor snapshot. A seq raises the SKIP bound only —
+            // resume tokens are opaque and never minted from one.
+            const first = ack.events[0]
+            const firstSeq = Number(first?.seq ?? first?.id)
+            if (Number.isFinite(firstSeq) && firstSeq > 0) t.lastEventSeq = Math.max(t.lastEventSeq, firstSeq - 1)
           }
         } catch (e) {
           // The one recoverable submit failure: the agent isn't running (stopped between
@@ -430,7 +459,8 @@ export class TaskDO extends DurableObject<Env> {
       }
       const emittedRef = { value: t.emittedText }
       const end: TurnEnd = await driveTurn(client, agentId, sessionId, sink, {
-        after: t.lastEventSeq,
+        ...(t.resumeCursor === undefined ? {} : { cursor: t.resumeCursor }),
+        skipThrough: t.lastEventSeq,
         signal: abort.signal,
         emittedText: emittedRef,
       }).finally(() => {
@@ -441,14 +471,19 @@ export class TaskDO extends DurableObject<Env> {
       const progressed = end.lastSeq > t.lastEventSeq
       if (progressed) t.terminalDrains = 0 // events still flowing → reset the drain budget
       t.lastEventSeq = end.lastSeq
+      if (end.cursor) t.resumeCursor = end.cursor
       t.emittedText = emittedRef.value
       if (!end.streamError) t.errors = 0 // a clean window ran — the ZooClaw API is reachable
 
       // Persist progress BEFORE acting on errors or polling status: frames this window
       // wrote are already durable, so losing the cursor would duplicate them on retry.
-      // The conversation-level cursor is monotonic and safe to advance even if ownership
-      // was lost mid-window; the turn key itself is ownership-guarded.
+      // The conversation-level resume state (token + numeric bound) is monotonic and safe
+      // to advance even if ownership was lost mid-window; the turn key itself is
+      // ownership-guarded. Writing 'sessionCursor' here is also the pre-token MIGRATION:
+      // a conversation restored from a bare 'sessionSeq' number earns its first token from
+      // the first streamed event and resumes opaquely from then on.
       await this.ctx.storage.put('sessionSeq', t.lastEventSeq)
+      if (end.cursor) await this.ctx.storage.put('sessionCursor', end.cursor)
       if (!(await this.putTurnIfOwned(t))) return // canceled/replaced mid-window — stop driving
       if (end.streamError) throw end.streamError // progress saved; classify below
 

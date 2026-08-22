@@ -7,6 +7,11 @@
  *
  * This is plain store-tailing — it never touches the relay — so it survives a backend
  * swap unchanged (only the SSE carrier and the Store driver change).
+ *
+ * The seq here is the KIT'S OWN frame seq (assigned by the DO as it appends to the
+ * Store), deliberately numeric and unrelated to the ZooClaw session-event lane — that
+ * lane resumes on opaque server-minted cursor tokens (server/zooclaw/turn-driver.ts) and
+ * its seqs never reach this file.
  */
 import type { Store } from './store.ts'
 
